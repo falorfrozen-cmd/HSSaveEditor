@@ -1,0 +1,10 @@
+This project is provided as-is for offline/single-player save editing.
+
+You may use, copy, modify, and share this tool, provided that:
+
+- It is not represented as an official Hero Siege tool.
+- It is not promoted for online, multiplayer, leaderboard, trading, or anti-cheat protected use.
+- This notice remains included with redistributed copies.
+
+No warranty is provided. Use at your own risk and keep backups of your saves.
+
