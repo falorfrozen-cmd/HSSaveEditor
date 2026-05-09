@@ -1,3 +1,13 @@
+# HS Save Editor
+
+Part of the **Hero Siege Offline Toolkit**.
+
+> Offline / single-player save editing tool for Hero Siege.  
+> Main hub: https://github.com/falorfrozen-cmd/hero-siege-offline-toolkit
+
+---
+
+
 Hero Siege Save Editor
 ======================
 
