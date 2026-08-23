@@ -1,0 +1,88 @@
+# Hero Siege Save Editor
+
+A Windows save editor for offline Hero Siege character `.hss` files, presented in a responsive Season 10-inspired Character Save Forge interface.
+
+The editor can load local character saves, edit common character fields, update shared `shop.ini` values such as gold/professions, and unlock Season 10 waypoints, difficulties, and a controlled total of 800 Ether Points. It also creates a backup before saving.
+
+## Download
+
+For normal use, download the latest release ZIP from the GitHub Releases page and run:
+
+```text
+HeroSiegeSaveEditor.exe
+```
+
+Python is not required for the `.exe` release.
+
+## Important Notice
+
+This editor is intended for offline/single-player character saves only.
+
+Do not use it with multiplayer, online characters, leaderboards, trading, or anti-cheat protected modes.
+
+The game must be fully closed before opening, editing, or saving a character file. If the game is still running, it may overwrite your changes or keep the save file locked.
+
+## Features
+
+- Hero Siege-inspired dark forge theme with a procedural rune header, responsive action grid, compact character vault, and scroll-safe content panel.
+- Loads Hero Siege character `.hss` files.
+- Shows save slots in numeric order.
+- Edits character name, class, level, hero level, experience, gold, wormhole level, and professions.
+- Reads/writes gold and profession values through `hs2saves/shop.ini`, matching the way Hero Siege stores those shared values.
+- Shows class names instead of class numbers.
+- Unlocks all Season 10 act/zone waypoints, including Act 9 and the expanded zone slots.
+- Unlocks the current Normal, Nightmare, Hell, and Inferno progression without changing the selected difficulty.
+- Unlocks the complete native 30-cell charm grid by completing Season 10's `Light of Dawn` reward state (`fallOfDarkness|4`). Legacy synthetic `charmSlot` fields from older editor builds are removed automatically.
+- Sets the character to exactly 800 total earned Ether Points through the game's nine native Ether quest-chain progress records.
+- Preserves already allocated nodes; the displayed unspent balance is therefore `800 - allocated nodes`.
+- Preserves every existing Ether Tree node allocation in the separate `etherN.hss` sidecar.
+- Saves with automatic timestamped backup.
+- Standalone Windows `.exe` build available.
+
+## How To Use
+
+1. Close Hero Siege completely.
+2. Run `HeroSiegeSaveEditor.exe`.
+3. Select a character save from the left list.
+4. Edit the fields you want.
+5. Press `Save With Backup`.
+6. Start the game again.
+
+Backups are created next to the edited save file.
+
+Gold and profession changes are saved to `shop.ini` in the same save folder. The editor finds it automatically.
+
+## Steam Deck / Proton Notes
+
+If a slot appears as `Empty / unsupported`, that file is not a readable character save for this editor. It may be an empty character slot, a Steam Cloud placeholder, or a different folder than the one the game actually uses.
+
+On Steam Deck, make sure the selected folder belongs to the same Proton prefix/account that launches Hero Siege.
+
+## Build From Source
+
+Python 3.13 was used for the current build.
+
+Install PyInstaller:
+
+```powershell
+python -m pip install pyinstaller
+```
+
+Build:
+
+```powershell
+python -m PyInstaller --onefile --windowed --name HeroSiegeSaveEditor hs_save_editor.py
+```
+
+The output will be:
+
+```text
+dist/HeroSiegeSaveEditor.exe
+```
+
+## Files
+
+- `hs_save_editor.py` - source code.
+- `test_hs_save_editor.py` - Season 10 save transformation and round-trip tests.
+- `README.md` - usage, safety, and build documentation.
+- `dist/HeroSiegeSaveEditor.exe` - generated executable after building locally.

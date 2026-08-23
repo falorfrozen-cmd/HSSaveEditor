@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-Minimal Hero Siege offline character save editor.
-
-This version intentionally keeps only:
-- the save-file picker on the left
-- editable character fields on the right
-- raw decoded save text below the fields
-- HSS decode/encode and backup-on-save
-
-It has no item database, stash, ether, snapshot, or external module dependencies.
-"""
+"""Hero Siege offline character save editor and Season 10 progression forge."""
 
 from __future__ import annotations
 
@@ -32,6 +22,7 @@ from tkinter import (
     X,
     Y,
     Button,
+    Canvas,
     Entry,
     Frame,
     Label,
@@ -52,21 +43,65 @@ from tkinter.scrolledtext import ScrolledText
 APP_TITLE = "Hero Siege Character Save Editor"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
-UI_BG = "#0f172a"
-UI_PANEL = "#111827"
-UI_CARD = "#1f2937"
-UI_CARD_2 = "#172033"
-UI_BORDER = "#334155"
-UI_TEXT = "#e5edf7"
-UI_MUTED = "#94a3b8"
-UI_FIELD = "#0b1120"
-UI_ACCENT = "#38bdf8"
-UI_ACCENT_DARK = "#0ea5e9"
-UI_WAYPOINT = "#2563eb"
-UI_WAYPOINT_DARK = "#1d4ed8"
-UI_DANGER = "#ef4444"
-UI_DANGER_DARK = "#dc2626"
-UI_NOTICE = "#f59e0b"
+S10_ACT_COUNT = 9
+S10_ZONE_SLOTS_PER_ACT = 10
+S10_MAX_CAMPAIGN_CLEAR = 4
+S10_ETHER_NODE_COUNT = 216
+ETHER_SAVE_VERSION = 1
+ETHER_LOADOUT_COUNT = 8
+QUESTLOG_SECTION = "4"
+CHARM_SLOT_QUEST_CHAIN = "fallOfDarkness"
+CHARM_SLOT_QUEST_PROGRESS = 4
+CHARM_SLOT_QUEST_DIFFICULTY = 3
+CHARM_SLOT_MAX_CELLS = 30
+LEGACY_CHARM_SLOT_SAVE_SECTION = "0"
+LEGACY_CHARM_SLOT_SAVE_KEY = "charmSlot"
+S10_TARGET_TOTAL_ETHER_POINTS = 800
+# S10 awards Ether through 25 quests. A completed quest advances its chain by
+# two save stages; the values below are the native final progress for each
+# chain. Difficulty is metadata for newly-created questlog slots.
+S10_ETHER_QUEST_CHAINS = (
+    ("etheringWormhole", 22, 3),
+    ("etheringHell", 6, 2),
+    ("etheringInferno", 2, 3),
+    ("etheringDamnation", 2, 3),
+    ("etheringEquilibrium", 2, 3),
+    ("etheringArchDemons", 4, 3),
+    ("etheringChallenge", 4, 2),
+    ("etheringChallengeInferno", 4, 3),
+    ("etheringMonsterSlayer", 4, 3),
+)
+S10_ETHER_POINT_WEIGHTS = {
+    "etheringWormhole": 1,
+    "etheringHell": 9,
+    "etheringInferno": 5,
+    "etheringDamnation": 3,
+    "etheringEquilibrium": 3,
+    "etheringArchDemons": 5,
+    "etheringChallenge": 5,
+    "etheringChallengeInferno": 5,
+    "etheringMonsterSlayer": 4,
+}
+UI_BG = "#09070d"
+UI_PANEL = "#100c14"
+UI_CARD = "#1a1420"
+UI_CARD_2 = "#130f19"
+UI_BORDER = "#4a354d"
+UI_TEXT = "#f2e9d7"
+UI_MUTED = "#a394a6"
+UI_FIELD = "#08060b"
+UI_ACCENT = "#e1ad3f"
+UI_ACCENT_DARK = "#b87817"
+UI_WAYPOINT = "#2854a5"
+UI_WAYPOINT_DARK = "#1c3b76"
+UI_DANGER = "#a02738"
+UI_DANGER_DARK = "#741c2a"
+UI_NOTICE = "#d89c2b"
+UI_GOLD_BRIGHT = "#ffd56a"
+UI_PURPLE = "#7136b8"
+UI_PURPLE_DARK = "#522489"
+UI_ETHER = "#159bb2"
+UI_ETHER_DARK = "#0d6e80"
 
 
 def normalize_line_endings(text: str) -> str:
@@ -207,6 +242,10 @@ HSS_XOR_KEY = bytes(
 
 class HssFormatError(ValueError):
     """Raised when a file does not look like the supported .hss format."""
+
+
+class EtherFormatError(ValueError):
+    """Raised when an etherN.hss sidecar is not valid Season 10 Ether JSON."""
 
 
 @dataclass
@@ -356,6 +395,129 @@ def write_plain_ini_file(path: Path, text: str, create_backup: bool = True) -> P
     return backup_path
 
 
+def ether_path_for_character(path: Path) -> Path:
+    slot = save_slot_number(path.name)
+    if slot is None:
+        raise EtherFormatError(f"Could not determine the character slot from {path.name}.")
+    return path.with_name(f"ether{slot}.hss")
+
+
+def default_ether_data() -> dict[str, object]:
+    return {"version": ETHER_SAVE_VERSION, "loadouts": [{} for _ in range(ETHER_LOADOUT_COUNT)]}
+
+
+def normalize_ether_data(data: object) -> dict[str, object]:
+    if not isinstance(data, dict):
+        raise EtherFormatError("Ether payload must be a JSON object.")
+    version = data.get("version")
+    if version != ETHER_SAVE_VERSION:
+        raise EtherFormatError(f"Unsupported Ether save version: {version!r}.")
+    loadouts = data.get("loadouts")
+    if not isinstance(loadouts, list):
+        raise EtherFormatError("Ether payload has no loadouts list.")
+
+    normalized = json.loads(json.dumps(data))
+    normalized_loadouts = normalized["loadouts"]
+    while len(normalized_loadouts) < ETHER_LOADOUT_COUNT:
+        normalized_loadouts.append({})
+    for index, loadout in enumerate(normalized_loadouts):
+        if not isinstance(loadout, dict):
+            raise EtherFormatError(f"Ether loadout {index + 1} is not an object.")
+        nodes = loadout.get("nodes", [])
+        if not isinstance(nodes, list):
+            raise EtherFormatError(f"Ether loadout {index + 1} nodes must be a list.")
+        clean_nodes: list[int] = []
+        for node in nodes:
+            if isinstance(node, bool):
+                raise EtherFormatError(f"Ether loadout {index + 1} contains an invalid node ID.")
+            try:
+                node_id = int(node)
+            except (TypeError, ValueError) as exc:
+                raise EtherFormatError(f"Ether loadout {index + 1} contains an invalid node ID: {node!r}.") from exc
+            if node_id != node or not 0 <= node_id < S10_ETHER_NODE_COUNT:
+                raise EtherFormatError(f"Ether node ID must be between 0 and {S10_ETHER_NODE_COUNT - 1}: {node!r}.")
+            clean_nodes.append(node_id)
+        if clean_nodes:
+            loadout["nodes"] = clean_nodes
+        else:
+            loadout.pop("nodes", None)
+    return normalized
+
+
+def decode_ether_bytes(raw: bytes | str) -> dict[str, object]:
+    encoded = raw.encode("ascii") if isinstance(raw, str) else raw
+    cleaned = b"".join(encoded.replace(b"\x00", b"").split())
+    if not cleaned:
+        return default_ether_data()
+    try:
+        payload = base64.b64decode(cleaned, validate=True)
+        data = json.loads(payload.decode("utf-8"))
+    except Exception as exc:
+        raise EtherFormatError(f"Could not decode Ether sidecar: {exc}") from exc
+    return normalize_ether_data(data)
+
+
+def read_ether_file(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return default_ether_data()
+    return decode_ether_bytes(path.read_bytes())
+
+
+def encode_ether_data(data: object) -> bytes:
+    normalized = normalize_ether_data(data)
+    payload = json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(payload) + b"\x00"
+
+
+def write_ether_file(path: Path, data: object, create_backup: bool = True) -> Path | None:
+    backup_path = None
+    if create_backup and path.exists():
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = path.with_name(f"{path.name}.bak_{timestamp}")
+        shutil.copy2(path, backup_path)
+    path.write_bytes(encode_ether_data(data))
+    return backup_path
+
+
+def ether_loadout_nodes(data: object, loadout_index: int) -> list[int]:
+    normalized = normalize_ether_data(data)
+    loadouts = normalized["loadouts"]
+    if not 0 <= loadout_index < len(loadouts):
+        raise EtherFormatError(f"Ether loadout must be between 1 and {len(loadouts)}.")
+    return list(loadouts[loadout_index].get("nodes", []))
+
+
+def set_ether_loadout_nodes(data: object, loadout_index: int, nodes: list[int]) -> dict[str, object]:
+    normalized = normalize_ether_data(data)
+    loadouts = normalized["loadouts"]
+    if not 0 <= loadout_index < len(loadouts):
+        raise EtherFormatError(f"Ether loadout must be between 1 and {len(loadouts)}.")
+    loadout = loadouts[loadout_index]
+    if nodes:
+        loadout["nodes"] = list(nodes)
+    else:
+        loadout.pop("nodes", None)
+    return normalize_ether_data(normalized)
+
+
+def parse_ether_node_ids(value: str) -> list[int]:
+    value = value.strip()
+    if not value:
+        return []
+    nodes: list[int] = []
+    for token in re.split(r"[\s,;]+", value):
+        if not token:
+            continue
+        try:
+            node_id = int(token)
+        except ValueError as exc:
+            raise EtherFormatError(f"Invalid Ether node ID: {token!r}.") from exc
+        if not 0 <= node_id < S10_ETHER_NODE_COUNT:
+            raise EtherFormatError(f"Ether node ID must be between 0 and {S10_ETHER_NODE_COUNT - 1}: {node_id}.")
+        nodes.append(node_id)
+    return nodes
+
+
 def classify_text(text: str, path: Path | None = None) -> str:
     name = path.name.lower() if path else ""
     if name.startswith("stash") or text.lstrip().startswith("{"):
@@ -453,6 +615,20 @@ def set_ini_value(text: str, section: str, key: str, value: str, kind: str) -> s
             body += "\n"
         body += f"{key}={replacement_value}\n"
 
+    return text[: match.start(2)] + body + text[match.end(2) :]
+
+
+def remove_ini_key(text: str, section: str, key: str) -> str:
+    """Remove every instance of a key from one INI section only."""
+    text = normalize_line_endings(text)
+    section_pattern = re.compile(rf"(?ms)^(\[{re.escape(section)}\]\s*)(.*?)(?=^\[|\Z)")
+    match = section_pattern.search(text)
+    if not match:
+        return text
+
+    body = match.group(2)
+    key_pattern = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=.*(?:\n|\Z)")
+    body = key_pattern.sub("", body)
     return text[: match.start(2)] + body + text[match.end(2) :]
 
 
@@ -659,56 +835,198 @@ def summarize_item_stat_slots(data: dict, db_path: Path | None) -> str:
 
 
 def unlock_all_waypoints(text: str) -> str:
-    for act in range(1, 9):
-        text = set_ini_value(text, "0", f"act_{act}", "4", "number")
-        for zone in range(5):
-            text = set_ini_value(text, "0", f"zone{act},{zone}", "4", "number")
+    """Unlock every campaign waypoint stored by the Season 10 save schema."""
+    for act in range(1, S10_ACT_COUNT + 1):
+        text = set_ini_value(text, "0", f"act_{act}", str(S10_MAX_CAMPAIGN_CLEAR), "number")
+        for zone in range(S10_ZONE_SLOTS_PER_ACT):
+            text = set_ini_value(
+                text,
+                "0",
+                f"zone{act},{zone}",
+                str(S10_MAX_CAMPAIGN_CLEAR),
+                "number",
+            )
     return text
+
+
+def unlock_all_difficulties(text: str) -> str:
+    """Unlock all four S10 difficulties without changing the selected one.
+
+    Season 10 gates progression on the Act 9 campaign-clear value. The legacy
+    Hell 1-5 fields and hard-coded quest slots are intentionally left untouched.
+    """
+    return unlock_all_waypoints(text)
 
 
 def unlock_inferno_difficulty(text: str) -> str:
-    text = unlock_all_waypoints(text)
-    text = set_ini_value(text, "0", "difficulty", "3", "number")
-    text = set_ini_value(text, "0", "hell_subdifficulty", "6", "number")
-    text = set_ini_value(text, "0", "act_previous", "0", "number")
-    text = set_ini_value(text, "0", "act_previous_0_0", "3", "number")
-    text = set_ini_value(text, "0", "act_previous_1_0", "1", "number")
-    text = set_ini_value(text, "0", "act_previous_2_0", "1", "number")
-    text = set_ini_value(text, "0", "act_previous_2_2", "4", "number")
-    text = set_ini_value(text, "0", "act_previous_2_3", "5", "number")
-    text = set_ini_value(text, "0", "act_previous_2_4", "0", "number")
-    text = set_ini_value(text, "0", "act_previous_3_0", "3", "number")
-    text = set_ini_value(text, "0", "waypoints", "eyB9", "text")
-    # Inferno being selectable appears to depend on quest/progress chains, not
-    # only the current difficulty value. These values were observed on a save
-    # where Inferno is unlocked.
-    text = set_ini_value(text, "4", "questlog_chain1", "mainNightmare|1", "text")
-    text = set_ini_value(text, "4", "questlog_chain8", "etheringHell|6", "text")
-    text = set_ini_value(text, "4", "questlog_chain9", "etheringDamnation|1", "text")
-    text = set_ini_value(text, "4", "questlog_chain12", "mainHell|1", "text")
-    text = set_ini_value(text, "4", "questlog_chain13", "etheringInferno|1", "text")
-    text = set_ini_value(text, "4", "questlog_chain17", "etheringChallengeInferno|1", "text")
-    text = set_ini_value(text, "4", "questlog_diff5", "3", "number")
-    text = set_ini_value(text, "4", "questlog_diff6", "3", "number")
-    text = set_ini_value(text, "4", "questlog_diff7", "3", "number")
-    text = set_ini_value(text, "4", "questlog_diff8", "2", "number")
-    text = set_ini_value(text, "4", "questlog_diff9", "3", "number")
-    for index in range(5, 10):
-        text = set_ini_value(text, "4", f"questlog_sub_diff{index}", "0", "number")
+    """Backward-compatible alias for integrations using the old function name."""
+    return unlock_all_difficulties(text)
+
+
+def quest_chain_entries(text: str) -> dict[int, tuple[str, int]]:
+    """Return questlog chain slots as {index: (chain_name, progress)}."""
+    body = dict(iter_ini_sections(text)).get(QUESTLOG_SECTION, "")
+    entries: dict[int, tuple[str, int]] = {}
+    pattern = r'(?m)^\s*questlog_chain(\d+)\s*=\s*"?([^"\r\n]*)"?\s*$'
+    for match in re.finditer(pattern, body):
+        index = int(match.group(1))
+        value = match.group(2).strip()
+        name, separator, progress_raw = value.partition("|")
+        if not name:
+            continue
+        try:
+            progress = int(float(progress_raw)) if separator else 0
+        except ValueError:
+            progress = 0
+        entries[index] = (name, progress)
+    return entries
+
+
+def set_quest_chain_progress(
+    text: str,
+    chain_name: str,
+    progress: int,
+    *,
+    difficulty: int,
+    sub_difficulty: int = 0,
+    preserve_higher: bool = True,
+) -> str:
+    """Upsert a quest chain without overwriting unrelated questlog slots."""
+    entries = quest_chain_entries(text)
+    matching_indexes = [index for index, entry in entries.items() if entry[0] == chain_name]
+    if matching_indexes:
+        target_indexes = matching_indexes
+    else:
+        used_indexes = set(entries)
+        index = 0
+        while index in used_indexes:
+            index += 1
+        target_indexes = [index]
+
+    for index in target_indexes:
+        existing_progress = entries.get(index, (chain_name, 0))[1]
+        final_progress = max(existing_progress, progress) if preserve_higher else progress
+        text = set_ini_value(
+            text,
+            QUESTLOG_SECTION,
+            f"questlog_chain{index}",
+            f"{chain_name}|{final_progress}",
+            "text",
+        )
+        text = set_ini_value(
+            text,
+            QUESTLOG_SECTION,
+            f"questlog_diff{index}",
+            str(difficulty),
+            "number",
+        )
+        text = set_ini_value(
+            text,
+            QUESTLOG_SECTION,
+            f"questlog_sub_diff{index}",
+            str(sub_difficulty),
+            "number",
+        )
     return text
+
+
+def unlock_charm_slots(text: str) -> str:
+    """Complete S10's Light of Dawn reward and stage the native 30-cell grid."""
+    text = set_quest_chain_progress(
+        text,
+        CHARM_SLOT_QUEST_CHAIN,
+        CHARM_SLOT_QUEST_PROGRESS,
+        difficulty=CHARM_SLOT_QUEST_DIFFICULTY,
+    )
+    return remove_ini_key(
+        text,
+        LEGACY_CHARM_SLOT_SAVE_SECTION,
+        LEGACY_CHARM_SLOT_SAVE_KEY,
+    )
+
+
+def unlock_all_ether_points(text: str) -> str:
+    """Complete all 25 native S10 Ether reward quests."""
+    for chain_name, final_progress, difficulty in S10_ETHER_QUEST_CHAINS:
+        text = set_quest_chain_progress(
+            text,
+            chain_name,
+            final_progress,
+            difficulty=difficulty,
+        )
+    return text
+
+
+def ether_earned_points(text: str) -> int:
+    """Reproduce S10's StatEtherPoints calculation from quest-chain stages."""
+    progress_by_chain: dict[str, int] = {}
+    for chain_name, progress in quest_chain_entries(text).values():
+        if chain_name in S10_ETHER_POINT_WEIGHTS:
+            progress_by_chain[chain_name] = max(progress_by_chain.get(chain_name, 0), progress)
+    total = sum(
+        progress_by_chain.get(chain_name, 0) * weight / 2
+        for chain_name, weight in S10_ETHER_POINT_WEIGHTS.items()
+    )
+    if not float(total).is_integer():
+        raise ValueError("Ether quest progress produced a fractional point total.")
+    return int(total)
+
+
+def grant_available_ether_points(text: str, target_available: int, allocated_nodes: int = 0) -> str:
+    """Set the earned total so the active loadout has target_available points."""
+    if target_available < 0 or allocated_nodes < 0:
+        raise ValueError("Ether point values cannot be negative.")
+    return set_total_ether_points(text, target_available + allocated_nodes)
+
+
+def set_total_ether_points(text: str, target_earned: int) -> str:
+    """Set the native quest-derived Ether total to an exact earned value."""
+    if target_earned < 0:
+        raise ValueError("Ether point values cannot be negative.")
+    other_points = 0
+    wormhole_difficulty = 3
+    for chain_name, final_progress, difficulty in S10_ETHER_QUEST_CHAINS:
+        if chain_name == "etheringWormhole":
+            wormhole_difficulty = difficulty
+            continue
+        text = set_quest_chain_progress(
+            text,
+            chain_name,
+            final_progress,
+            difficulty=difficulty,
+            preserve_higher=False,
+        )
+        other_points += final_progress * S10_ETHER_POINT_WEIGHTS[chain_name] // 2
+    wormhole_points = target_earned - other_points
+    if wormhole_points < 0:
+        raise ValueError("Requested Ether target is below the points granted by the other native quest chains.")
+    return set_quest_chain_progress(
+        text,
+        "etheringWormhole",
+        wormhole_points * 2,
+        difficulty=wormhole_difficulty,
+        preserve_higher=False,
+    )
 
 
 class HssEditorApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1120x760")
+        self.root.geometry("1180x900")
+        self.root.minsize(980, 700)
         self.save_dir = DEFAULT_SAVE_DIR if DEFAULT_SAVE_DIR.exists() else Path.cwd()
         self.loaded: LoadedSave | None = None
         self.raw_buffer = ""
         self.raw_window: Toplevel | None = None
         self.raw_text: ScrolledText | None = None
         self.inventory_window: Toplevel | None = None
+        # Kept internally for sidecar diagnostics; the release UI grants
+        # points through native quest progress instead of exposing node IDs.
+        self.ether_window: Toplevel | None = None
+        self.ether_path: Path | None = None
+        self.ether_data: dict[str, object] | None = None
+        self.ether_loadout_list: Listbox | None = None
         self.file_list_paths: dict[str, Path] = {}
         self.field_vars: dict[FieldSpec, StringVar] = {}
         self.field_widgets: dict[FieldSpec, object] = {}
@@ -717,8 +1035,11 @@ class HssEditorApp:
 
         self.status = StringVar(value="Ready")
         self.current_file = StringVar(value="No character save loaded")
+        self.slot_summary = StringVar(value="SCANNING LOCAL VAULT...")
         self.raw_search_var = StringVar(value="")
         self.raw_search_status = StringVar(value="")
+        self.ether_file_status = StringVar(value="")
+        self.ether_nodes_var = StringVar(value="")
 
         self._build_layout()
         self.refresh_file_list()
@@ -750,7 +1071,7 @@ class HssEditorApp:
         bg = bg or default_bg
         active_bg = active_bg or default_active_bg
         fg = fg or default_fg
-        return Button(
+        button = Button(
             parent,
             text=text,
             command=command,
@@ -761,10 +1082,17 @@ class HssEditorApp:
             bd=0,
             relief="flat",
             padx=12,
-            pady=8,
+            pady=9,
             cursor="hand2",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI Semibold", 10),
+            highlightthickness=1,
+            highlightbackground=bg,
+            highlightcolor=active_bg,
+            takefocus=True,
         )
+        button.bind("<Enter>", lambda _event, widget=button, color=active_bg: widget.configure(bg=color))
+        button.bind("<Leave>", lambda _event, widget=button, color=bg: widget.configure(bg=color))
+        return button
 
     def make_entry(self, parent, var: StringVar, width: int = 26) -> Entry:
         return Entry(
@@ -778,6 +1106,93 @@ class HssEditorApp:
             highlightthickness=1,
             highlightbackground=UI_BORDER,
             highlightcolor=UI_ACCENT,
+            font=("Segoe UI", 10),
+        )
+
+    def _draw_forge_header(self, event=None) -> None:
+        canvas = self.header_canvas
+        width = max(1, event.width if event is not None else canvas.winfo_width())
+        height = max(1, event.height if event is not None else canvas.winfo_height())
+        canvas.delete("forge_header")
+
+        top_rgb = (14, 8, 17)
+        bottom_rgb = (37, 14, 29)
+        for y in range(0, height, 3):
+            ratio = y / max(1, height - 1)
+            rgb = tuple(round(start + (end - start) * ratio) for start, end in zip(top_rgb, bottom_rgb))
+            color = "#" + "".join(f"{channel:02x}" for channel in rgb)
+            canvas.create_rectangle(0, y, width, min(height, y + 3), fill=color, outline="", tags="forge_header")
+
+        canvas.create_polygon(
+            0,
+            0,
+            min(width, 360),
+            0,
+            min(width, 250),
+            height,
+            0,
+            height,
+            fill="#160d1b",
+            outline="",
+            tags="forge_header",
+        )
+        canvas.create_line(0, height - 3, width, height - 3, fill="#6e4517", width=1, tags="forge_header")
+        canvas.create_line(0, height - 1, width, height - 1, fill=UI_ACCENT, width=1, tags="forge_header")
+
+        if width >= 720:
+            for index in range(6):
+                center_x = width - 38 - index * 46
+                center_y = height // 2
+                size = 13 + (index % 2) * 3
+                canvas.create_polygon(
+                    center_x,
+                    center_y - size,
+                    center_x + size,
+                    center_y,
+                    center_x,
+                    center_y + size,
+                    center_x - size,
+                    center_y,
+                    fill="",
+                    outline="#5c304c",
+                    width=1,
+                    tags="forge_header",
+                )
+                canvas.create_line(
+                    center_x - size + 4,
+                    center_y,
+                    center_x + size - 4,
+                    center_y,
+                    fill="#6c3b57",
+                    tags="forge_header",
+                )
+
+        canvas.create_text(
+            24,
+            12,
+            anchor="nw",
+            text="HERO SIEGE",
+            fill=UI_GOLD_BRIGHT,
+            font=("Segoe UI Semibold", 9),
+            tags="forge_header",
+        )
+        canvas.create_text(
+            22,
+            29,
+            anchor="nw",
+            text="CHARACTER SAVE FORGE",
+            fill=UI_TEXT,
+            font=("Segoe UI Semibold", 20),
+            tags="forge_header",
+        )
+        canvas.create_text(
+            width - 22,
+            18,
+            anchor="ne",
+            text="OFFLINE  •  SEASON 10",
+            fill=UI_MUTED,
+            font=("Segoe UI Semibold", 9),
+            tags="forge_header",
         )
 
     def _build_layout(self) -> None:
@@ -827,21 +1242,100 @@ class HssEditorApp:
             font=("Segoe UI", 9, "bold"),
         )
         style.map("Treeview", background=[("selected", UI_ACCENT)], foreground=[("selected", "#04111f")])
+        style.configure(
+            "Forge.Vertical.TScrollbar",
+            background=UI_CARD,
+            troughcolor=UI_FIELD,
+            bordercolor=UI_BORDER,
+            arrowcolor=UI_MUTED,
+            darkcolor=UI_CARD,
+            lightcolor=UI_CARD,
+        )
+        style.map("Forge.Vertical.TScrollbar", background=[("active", UI_BORDER), ("pressed", UI_ACCENT_DARK)])
 
-        main = PanedWindow(self.root, orient="horizontal", sashrelief="flat", bg=UI_BG, bd=0)
+        self.header_canvas = Canvas(self.root, height=78, bg=UI_PANEL, bd=0, highlightthickness=0)
+        self.header_canvas.pack(fill=X)
+        self.header_canvas.bind("<Configure>", self._draw_forge_header)
+
+        main = PanedWindow(
+            self.root,
+            orient="horizontal",
+            sashrelief="flat",
+            sashwidth=2,
+            bg="#2b1e2c",
+            bd=0,
+        )
         main.pack(fill=BOTH, expand=True)
 
         sidebar = Frame(main, padx=14, pady=14, bg=UI_PANEL)
-        main.add(sidebar, width=330)
+        main.add(sidebar, width=300, minsize=270)
 
-        Label(sidebar, text="Save Folder", bg=UI_PANEL, fg=UI_TEXT, font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.folder_label = Label(sidebar, text=str(self.save_dir), wraplength=290, fg=UI_MUTED, bg=UI_PANEL)
-        self.folder_label.pack(anchor="w", fill=X, pady=(0, 8))
+        Label(
+            sidebar,
+            text="CHARACTER VAULT",
+            bg=UI_PANEL,
+            fg=UI_GOLD_BRIGHT,
+            font=("Segoe UI Semibold", 14),
+        ).pack(anchor="w")
+        Label(
+            sidebar,
+            text="LOCAL OFFLINE SAVE SLOTS",
+            bg=UI_PANEL,
+            fg=UI_MUTED,
+            font=("Segoe UI Semibold", 8),
+        ).pack(anchor="w", pady=(0, 10))
 
-        self.make_button(sidebar, "Change Folder", self.choose_save_folder).pack(fill=X)
-        self.make_button(sidebar, "Refresh", self.refresh_file_list).pack(fill=X, pady=(8, 12))
+        folder_card = Frame(
+            sidebar,
+            bg=UI_CARD_2,
+            padx=10,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+        )
+        folder_card.pack(fill=X, pady=(0, 8))
+        Label(
+            folder_card,
+            text="SAVE DIRECTORY",
+            bg=UI_CARD_2,
+            fg=UI_NOTICE,
+            font=("Segoe UI Semibold", 8),
+        ).pack(anchor="w")
+        self.folder_label = Label(
+            folder_card,
+            text=str(self.save_dir),
+            wraplength=245,
+            justify="left",
+            fg=UI_MUTED,
+            bg=UI_CARD_2,
+        )
+        self.folder_label.pack(anchor="w", fill=X, pady=(2, 0))
 
-        list_frame = Frame(sidebar, bg=UI_PANEL)
+        folder_actions = Frame(sidebar, bg=UI_PANEL)
+        folder_actions.pack(fill=X, pady=(0, 10))
+        folder_actions.columnconfigure(0, weight=1, uniform="folder_action")
+        folder_actions.columnconfigure(1, weight=1, uniform="folder_action")
+        self.make_button(folder_actions, "Change Folder", self.choose_save_folder).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4)
+        )
+        self.make_button(folder_actions, "Refresh", self.refresh_file_list).grid(
+            row=0, column=1, sticky="ew", padx=(4, 0)
+        )
+
+        Label(
+            sidebar,
+            textvariable=self.slot_summary,
+            bg=UI_PANEL,
+            fg=UI_NOTICE,
+            font=("Segoe UI Semibold", 8),
+        ).pack(anchor="w", pady=(0, 5))
+
+        list_frame = Frame(
+            sidebar,
+            bg=UI_FIELD,
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+        )
         list_frame.pack(fill=BOTH, expand=True)
         self.file_list = Listbox(
             list_frame,
@@ -854,51 +1348,107 @@ class HssEditorApp:
             highlightthickness=1,
             highlightbackground=UI_BORDER,
             highlightcolor=UI_ACCENT,
-            font=("Consolas", 10),
+            font=("Cascadia Mono", 9),
         )
         self.file_list.pack(side=LEFT, fill=BOTH, expand=True)
-        scrollbar = Scrollbar(list_frame, orient=VERTICAL, command=self.file_list.yview)
+        scrollbar = ttk.Scrollbar(
+            list_frame,
+            orient=VERTICAL,
+            command=self.file_list.yview,
+            style="Forge.Vertical.TScrollbar",
+        )
         scrollbar.pack(side=RIGHT, fill=Y)
         self.file_list.config(yscrollcommand=scrollbar.set)
         self.file_list.bind("<Double-Button-1>", lambda _event: self.open_selected_file())
 
-        self.make_button(sidebar, "Open Selected", self.open_selected_file, accent=True).pack(fill=X, pady=(12, 0))
+        self.make_button(sidebar, "OPEN SELECTED CHARACTER", self.open_selected_file, accent=True).pack(
+            fill=X, pady=(10, 0)
+        )
         self.make_button(sidebar, "Open File...", self.open_file_dialog).pack(fill=X, pady=(8, 0))
 
-        content = Frame(main, padx=22, pady=20, bg=UI_BG)
-        main.add(content)
+        content_host = Frame(main, bg=UI_BG)
+        main.add(content_host, minsize=650)
+        content_host.rowconfigure(0, weight=1)
+        content_host.columnconfigure(0, weight=1)
+
+        content_canvas = Canvas(
+            content_host,
+            bg=UI_BG,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=24,
+        )
+        content_canvas.grid(row=0, column=0, sticky="nsew")
+        content_scrollbar = ttk.Scrollbar(
+            content_host,
+            orient=VERTICAL,
+            command=content_canvas.yview,
+            style="Forge.Vertical.TScrollbar",
+        )
+        content_scrollbar.grid(row=0, column=1, sticky="ns")
+        content_canvas.configure(yscrollcommand=content_scrollbar.set)
+
+        content = Frame(content_canvas, padx=20, pady=14, bg=UI_BG)
+        content_window = content_canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: content_canvas.configure(scrollregion=content_canvas.bbox("all")),
+            add="+",
+        )
+        content_canvas.bind(
+            "<Configure>",
+            lambda event: content_canvas.itemconfigure(content_window, width=event.width),
+            add="+",
+        )
+
+        def scroll_content(event) -> None:
+            hovered = self.root.winfo_containing(event.x_root, event.y_root)
+            if hovered is None or not str(hovered).startswith(str(content_canvas)):
+                return
+            delta = -1 if event.delta > 0 else 1
+            content_canvas.yview_scroll(delta * 3, "units")
+
+        self.root.bind_all("<MouseWheel>", scroll_content, add="+")
 
         Label(
             content,
+            text="ACTIVE CHARACTER SAVE",
+            anchor="w",
+            font=("Segoe UI Semibold", 8),
+            bg=UI_BG,
+            fg=UI_NOTICE,
+        ).pack(fill=X)
+        current_file_label = Label(
+            content,
             textvariable=self.current_file,
             anchor="w",
-            font=("Segoe UI", 13, "bold"),
+            justify="left",
+            font=("Segoe UI Semibold", 13),
             bg=UI_BG,
             fg=UI_TEXT,
-        ).pack(
-            fill=X, pady=(0, 12)
         )
+        current_file_label.pack(fill=X, pady=(2, 5))
 
         help_text = "Open a character .hss file, edit the fields, then press Save With Backup. Empty fields are not written."
         Label(content, text=help_text, wraplength=720, justify="left", fg=UI_MUTED, bg=UI_BG).pack(
-            anchor="w", pady=(0, 14)
+            anchor="w", pady=(0, 9)
         )
 
         notice_frame = Frame(
             content,
             bg=UI_CARD_2,
-            padx=14,
-            pady=10,
+            padx=12,
+            pady=8,
             highlightthickness=1,
             highlightbackground=UI_NOTICE,
         )
-        notice_frame.pack(fill=X, anchor="n", pady=(0, 14))
+        notice_frame.pack(fill=X, anchor="n", pady=(0, 10))
         Label(
             notice_frame,
-            text="Important Notice",
+            text="OFFLINE SAFETY NOTICE",
             bg=UI_CARD_2,
             fg=UI_NOTICE,
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI Semibold", 9),
         ).pack(anchor="w")
         notice_text = (
             "This editor is intended for offline/single-player character saves only. "
@@ -913,20 +1463,25 @@ class HssEditorApp:
             bg=UI_CARD_2,
             fg=UI_TEXT,
         )
-        notice_label.pack(fill=X, anchor="w", pady=(4, 0))
-        content.bind(
-            "<Configure>",
-            lambda event: notice_label.configure(wraplength=max(320, event.width - 72)),
-            add="+",
-        )
+        notice_label.pack(fill=X, anchor="w", pady=(3, 0))
 
-        grid = LabelFrame(content, text="Character Fields", padx=16, pady=14, bg=UI_CARD, fg=UI_TEXT, bd=1, relief="solid")
+        grid = LabelFrame(
+            content,
+            text="  CHARACTER ATTRIBUTES  ",
+            padx=14,
+            pady=10,
+            bg=UI_CARD,
+            fg=UI_GOLD_BRIGHT,
+            font=("Segoe UI Semibold", 9),
+            bd=1,
+            relief="solid",
+        )
         grid.pack(fill=X, anchor="n")
 
         for index, spec in enumerate(CHARACTER_FIELDS):
             row = index // 2
             column = (index % 2) * 2
-            Label(grid, text=spec.label, bg=UI_CARD, fg=UI_TEXT).grid(
+            Label(grid, text=spec.label, bg=UI_CARD, fg=UI_MUTED).grid(
                 row=row, column=column, sticky="w", padx=(0, 12), pady=7
             )
             var = StringVar()
@@ -948,36 +1503,76 @@ class HssEditorApp:
         for column in range(4):
             grid.columnconfigure(column, weight=1 if column in (1, 3) else 0)
 
-        professions = LabelFrame(content, text="Professions", padx=16, pady=12, bg=UI_CARD, fg=UI_TEXT, bd=1, relief="solid")
+        professions = LabelFrame(
+            content,
+            text="  PROFESSIONS  ",
+            padx=14,
+            pady=8,
+            bg=UI_CARD,
+            fg=UI_GOLD_BRIGHT,
+            font=("Segoe UI Semibold", 9),
+            bd=1,
+            relief="solid",
+        )
         professions.pack(fill=X, anchor="n", pady=(8, 0))
 
         for index, spec in enumerate(PROFESSION_FIELDS):
-            column = index * 2
-            Label(professions, text=spec.label, bg=UI_CARD, fg=UI_TEXT).grid(
-                row=0, column=column, sticky="w", padx=(0, 10), pady=6
+            row = index // 2
+            column = (index % 2) * 2
+            Label(professions, text=spec.label, bg=UI_CARD, fg=UI_MUTED).grid(
+                row=row, column=column, sticky="w", padx=(0, 10), pady=5
             )
             var = StringVar()
             widget = self.make_entry(professions, var, width=18)
             widget.grid(
-                row=0, column=column + 1, sticky="we", padx=(0, 24), pady=6
+                row=row, column=column + 1, sticky="we", padx=(0, 22), pady=5
             )
             self.field_vars[spec] = var
             self.field_widgets[spec] = widget
 
-        for column in range(8):
+        for column in range(4):
             professions.columnconfigure(column, weight=1 if column % 2 else 0)
 
         for var in self.field_vars.values():
             var.trace_add("write", self._mark_character_fields_dirty)
 
-        actions = Frame(content, bg=UI_BG)
-        actions.pack(fill=X, pady=14)
-        self.make_button(actions, "Reload From Disk", self.reload_current).pack(side=LEFT)
-        self.make_button(actions, "Save With Backup", self.save_current, accent=True).pack(side=LEFT)
-        self.make_button(actions, "Save As...", self.save_as).pack(side=LEFT, padx=8)
+        actions = LabelFrame(
+            content,
+            text="  SAVE OPERATIONS  ",
+            padx=8,
+            pady=8,
+            bg=UI_BG,
+            fg=UI_GOLD_BRIGHT,
+            font=("Segoe UI Semibold", 9),
+            bd=0,
+        )
+        actions.pack(fill=X, pady=(8, 4))
+        for column in range(3):
+            actions.columnconfigure(column, weight=1, uniform="save_action")
+        self.make_button(actions, "Reload From Disk", self.reload_current).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4)
+        )
+        self.make_button(actions, "SAVE WITH BACKUP", self.save_current, accent=True).grid(
+            row=0, column=1, sticky="ew", padx=4
+        )
+        self.make_button(actions, "Save As...", self.save_as).grid(
+            row=0, column=2, sticky="ew", padx=(4, 0)
+        )
 
-        unlock_actions = Frame(content, bg=UI_BG)
-        unlock_actions.pack(fill=X, pady=(0, 12))
+        unlock_actions = LabelFrame(
+            content,
+            text="  SEASON 10 PROGRESSION FORGE  ",
+            padx=8,
+            pady=8,
+            bg=UI_BG,
+            fg=UI_GOLD_BRIGHT,
+            font=("Segoe UI Semibold", 9),
+            bd=0,
+        )
+        unlock_actions.pack(fill=X, pady=(0, 7))
+        for column in range(2):
+            unlock_actions.columnconfigure(column, weight=1, uniform="unlock_action")
+
         self.make_button(
             unlock_actions,
             "Unlock All Waypoints",
@@ -985,15 +1580,65 @@ class HssEditorApp:
             bg=UI_WAYPOINT,
             active_bg=UI_WAYPOINT_DARK,
             fg="#eff6ff",
-        ).pack(side=LEFT)
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=(0, 5))
         self.make_button(
             unlock_actions,
-            "Unlock Inferno Difficulty",
-            self.apply_unlock_inferno_difficulty,
+            "Unlock All Difficulties (S10)",
+            self.apply_unlock_all_difficulties,
             danger=True,
-        ).pack(side=LEFT, padx=8)
+        ).grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=(0, 5))
+        self.make_button(
+            unlock_actions,
+            "Unlock All Charm Slots (30 Max)",
+            self.apply_unlock_charm_slots,
+            bg=UI_PURPLE,
+            active_bg=UI_PURPLE_DARK,
+            fg="#f5f3ff",
+        ).grid(row=1, column=0, sticky="ew", padx=(0, 5), pady=(5, 0))
+        self.make_button(
+            unlock_actions,
+            "Set Total Ether Points to 800",
+            self.apply_unlock_all_ether_points,
+            bg=UI_ETHER,
+            active_bg=UI_ETHER_DARK,
+            fg="#ecfeff",
+        ).grid(row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
 
-        Label(content, textvariable=self.status, anchor="w", fg=UI_MUTED, bg=UI_BG).pack(fill=X, pady=(10, 0))
+        status_frame = Frame(
+            content,
+            bg=UI_CARD_2,
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+        )
+        status_frame.pack(fill=X, pady=(4, 0))
+        Frame(status_frame, width=4, bg=UI_ACCENT).pack(side=LEFT, fill=Y)
+        status_body = Frame(status_frame, bg=UI_CARD_2, padx=10, pady=7)
+        status_body.pack(side=LEFT, fill=X, expand=True)
+        Label(
+            status_body,
+            text="FORGE STATUS",
+            anchor="w",
+            fg=UI_NOTICE,
+            bg=UI_CARD_2,
+            font=("Segoe UI Semibold", 8),
+        ).pack(fill=X)
+        status_label = Label(
+            status_body,
+            textvariable=self.status,
+            anchor="w",
+            justify="left",
+            fg=UI_MUTED,
+            bg=UI_CARD_2,
+        )
+        status_label.pack(fill=X, pady=(2, 0))
+
+        def resize_content_labels(event) -> None:
+            wrap = max(320, event.width - 64)
+            current_file_label.configure(wraplength=wrap)
+            notice_label.configure(wraplength=wrap)
+            status_label.configure(wraplength=wrap)
+
+        content.bind("<Configure>", resize_content_labels, add="+")
 
     def choose_save_folder(self) -> None:
         selected = filedialog.askdirectory(initialdir=str(self.save_dir), title="Choose Hero Siege save folder")
@@ -1006,6 +1651,7 @@ class HssEditorApp:
         self.file_list.delete(0, END)
         self.file_list_paths.clear()
         if not self.save_dir.exists():
+            self.slot_summary.set("SAVE DIRECTORY NOT FOUND")
             self.set_status(f"Folder does not exist: {self.save_dir}")
             return
 
@@ -1016,12 +1662,16 @@ class HssEditorApp:
         if sub.is_dir():
             for path in sorted(sub.glob("herosiege*.hss"), key=lambda p: p.name.lower()):
                 display_paths.append((str(Path("hs2saves") / path.name), path))
+        populated_count = 0
         for display, _path in sorted(display_paths, key=lambda item: save_slot_sort_key(item[0])):
             label = save_list_label(display, _path)
+            if "   Unnamed" not in label:
+                populated_count += 1
             if label in self.file_list_paths:
                 label = f"{label}   ({display})"
             self.file_list_paths[label] = _path.resolve()
             self.file_list.insert(END, label)
+        self.slot_summary.set(f"{populated_count} CHARACTERS  •  {len(display_paths)} SLOT FILES")
         self.set_status(f"Found {len(display_paths)} character .hss files.")
 
     def _path_from_file_list_entry(self, entry: str) -> Path:
@@ -1397,9 +2047,9 @@ class HssEditorApp:
             return
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
-        self.set_status("All act/zone waypoint values set to 4 in raw text. Save With Backup to write the file.")
+        self.set_status("Season 10 waypoints (Acts 1-9) unlocked in raw text. Save With Backup to write the file.")
 
-    def apply_unlock_inferno_difficulty(self) -> None:
+    def apply_unlock_all_difficulties(self) -> None:
         if not self.loaded:
             messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
             return
@@ -1407,13 +2057,293 @@ class HssEditorApp:
             text = self.get_raw()
             if self._character_field_vars_dirty:
                 text = self.merge_character_field_vars_into_text(text)
-            text = unlock_inferno_difficulty(text)
+            text = unlock_all_difficulties(text)
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Could not unlock Inferno difficulty:\n{exc}")
+            messagebox.showerror(APP_TITLE, f"Could not unlock all difficulties:\n{exc}")
             return
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
-        self.set_status("Inferno difficulty/progress flags set in raw text. Save With Backup to write the file.")
+        self.set_status(
+            "Normal, Nightmare, Hell and Inferno unlocked through Act 9 progress. "
+            "Current difficulty was preserved. Save With Backup to write the file."
+        )
+
+    def apply_unlock_inferno_difficulty(self) -> None:
+        """Compatibility wrapper retained for older UI integrations."""
+        self.apply_unlock_all_difficulties()
+
+    def apply_unlock_charm_slots(self) -> None:
+        if not self.loaded:
+            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            return
+        try:
+            text = self.get_raw()
+            if self._character_field_vars_dirty:
+                text = self.merge_character_field_vars_into_text(text)
+            text = unlock_charm_slots(text)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not unlock all charm slots:\n{exc}")
+            return
+        self.set_raw(text)
+        self.populate_fields_from_raw(show_errors=False, update_status=False)
+        self.set_status(
+            "Light of Dawn was completed with Season 10's native fallOfDarkness|4 state. "
+            f"The full native {CHARM_SLOT_MAX_CELLS}-cell charm grid is staged and obsolete charmSlot fields were removed. "
+            "Save With Backup to write the file."
+        )
+
+    def apply_unlock_all_ether_points(self) -> None:
+        if not self.loaded:
+            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            return
+        try:
+            ether_path = ether_path_for_character(self.loaded.path)
+            ether_data = read_ether_file(ether_path)
+            active_loadout = self.active_ether_loadout_index()
+            allocated_nodes = len(ether_loadout_nodes(ether_data, active_loadout))
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not read the active Ether loadout:\n{exc}")
+            return
+        target_earned = S10_TARGET_TOTAL_ETHER_POINTS
+        expected_available = max(0, target_earned - allocated_nodes)
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Set this character to {target_earned} total earned Ether Points?\n\n"
+            f"Allocated nodes: {allocated_nodes}\n"
+            f"Expected available balance: {expected_available}\n\n"
+            "Existing Ether Tree node allocations will be preserved. "
+            "The change is not written until Save With Backup.",
+            parent=self.root,
+        ):
+            return
+        try:
+            text = self.get_raw()
+            if self._character_field_vars_dirty:
+                text = self.merge_character_field_vars_into_text(text)
+            text = set_total_ether_points(text, target_earned)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not unlock the Ether Points:\n{exc}")
+            return
+        self.set_raw(text)
+        self.populate_fields_from_raw(show_errors=False, update_status=False)
+        self.set_status(
+            f"{target_earned} total earned Ether Points are staged for loadout "
+            f"{active_loadout + 1} ({expected_available} available, {allocated_nodes} allocated). "
+            "Existing Ether node allocations were preserved. "
+            "Press Save With Backup to write the character save."
+        )
+
+    def active_ether_loadout_index(self) -> int:
+        if self.ether_loadout_list is not None and self.ether_loadout_list.winfo_exists():
+            selection = self.ether_loadout_list.curselection()
+            if selection:
+                return int(selection[0])
+        if self.loaded:
+            try:
+                index = int(parse_number(get_ini_value(self.get_raw(), "0", "ether_loadout") or "0"))
+                if 0 <= index < ETHER_LOADOUT_COUNT:
+                    return index
+            except ValueError:
+                pass
+        return 0
+
+    def open_ether_window(self) -> None:
+        if not self.loaded:
+            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            return
+        try:
+            self.ether_path = ether_path_for_character(self.loaded.path)
+            self.ether_data = read_ether_file(self.ether_path)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not open the Season 10 Ether save:\n{exc}")
+            return
+
+        if self.ether_window is not None and self.ether_window.winfo_exists():
+            self.refresh_ether_window()
+            self.ether_window.lift()
+            return
+
+        self.ether_window = Toplevel(self.root)
+        self.ether_window.title("Season 10 Ether Tree")
+        self.ether_window.geometry("760x470")
+        self.ether_window.configure(bg=UI_BG)
+
+        wrapper = Frame(self.ether_window, padx=16, pady=16, bg=UI_BG)
+        wrapper.pack(fill=BOTH, expand=True)
+        Label(wrapper, text="Season 10 Ether Tree", font=("Segoe UI", 16, "bold"), bg=UI_BG, fg=UI_TEXT).pack(
+            anchor="w"
+        )
+        Label(wrapper, textvariable=self.ether_file_status, bg=UI_BG, fg=UI_MUTED).pack(anchor="w", pady=(2, 10))
+
+        body = Frame(wrapper, bg=UI_BG)
+        body.pack(fill=BOTH, expand=True)
+        left = LabelFrame(body, text="Loadouts", padx=10, pady=10, bg=UI_CARD, fg=UI_TEXT, bd=1, relief="solid")
+        left.pack(side=LEFT, fill=Y)
+        self.ether_loadout_list = Listbox(
+            left,
+            width=34,
+            height=12,
+            exportselection=False,
+            bg=UI_FIELD,
+            fg=UI_TEXT,
+            selectbackground=UI_ACCENT,
+            selectforeground="#04111f",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+        )
+        self.ether_loadout_list.pack(fill=Y, expand=True)
+        self.ether_loadout_list.bind("<<ListboxSelect>>", lambda _event: self.show_selected_ether_nodes())
+
+        right = LabelFrame(body, text="Selected Loadout", padx=14, pady=12, bg=UI_CARD, fg=UI_TEXT, bd=1, relief="solid")
+        right.pack(side=LEFT, fill=BOTH, expand=True, padx=(12, 0))
+        Label(
+            right,
+            text="Allocated node IDs (comma or space separated). The S10 file preserves order and duplicate IDs.",
+            bg=UI_CARD,
+            fg=UI_MUTED,
+            justify="left",
+            wraplength=420,
+        ).pack(anchor="w")
+        self.make_entry(right, self.ether_nodes_var, width=56).pack(fill=X, pady=(10, 12))
+        self.make_button(right, "Apply IDs To Selected Loadout", self.apply_ether_nodes_to_memory, accent=True).pack(
+            anchor="w"
+        )
+        self.make_button(
+            right,
+            "Reset Selected Loadout",
+            self.reset_selected_ether_loadout,
+            danger=True,
+        ).pack(anchor="w", pady=(10, 0))
+        self.make_button(right, "Reset All 8 Loadouts", self.reset_all_ether_loadouts, danger=True).pack(
+            anchor="w", pady=(8, 0)
+        )
+        Label(
+            right,
+            text="Resetting removes allocated node IDs from the Ether sidecar. Nothing is written until Save Ether With Backup.",
+            bg=UI_CARD,
+            fg=UI_NOTICE,
+            justify="left",
+            wraplength=420,
+        ).pack(anchor="w", pady=(14, 0))
+
+        actions = Frame(wrapper, bg=UI_BG)
+        actions.pack(fill=X, pady=(12, 0))
+        self.make_button(actions, "Reload Ether From Disk", self.reload_ether_from_disk).pack(side=LEFT)
+        self.make_button(actions, "Save Ether With Backup", self.save_ether_changes, accent=True).pack(side=LEFT, padx=8)
+        self.make_button(actions, "Close", self.close_ether_window).pack(side=LEFT)
+
+        self.ether_window.protocol("WM_DELETE_WINDOW", self.close_ether_window)
+        self.refresh_ether_window()
+
+    def refresh_ether_window(self, selected_index: int | None = None) -> None:
+        if self.ether_window is None or not self.ether_window.winfo_exists() or self.ether_data is None:
+            return
+        if selected_index is None:
+            selected_index = self.active_ether_loadout_index()
+        active_index = 0
+        if self.loaded:
+            try:
+                active_index = int(parse_number(get_ini_value(self.get_raw(), "0", "ether_loadout") or "0"))
+            except ValueError:
+                active_index = 0
+        if self.ether_path is not None:
+            state = "found" if self.ether_path.exists() else "new sidecar"
+            self.ether_file_status.set(f"{self.ether_path.name} — {state}")
+        if self.ether_loadout_list is None:
+            return
+        self.ether_loadout_list.delete(0, END)
+        for index in range(ETHER_LOADOUT_COUNT):
+            nodes = ether_loadout_nodes(self.ether_data, index)
+            active = "  [ACTIVE]" if index == active_index else ""
+            self.ether_loadout_list.insert(END, f"Loadout {index + 1}: {len(nodes)} node entries{active}")
+        selected_index = max(0, min(selected_index, ETHER_LOADOUT_COUNT - 1))
+        self.ether_loadout_list.selection_set(selected_index)
+        self.ether_loadout_list.activate(selected_index)
+        self.show_selected_ether_nodes()
+
+    def show_selected_ether_nodes(self) -> None:
+        if self.ether_data is None:
+            self.ether_nodes_var.set("")
+            return
+        index = self.active_ether_loadout_index()
+        self.ether_nodes_var.set(", ".join(str(node) for node in ether_loadout_nodes(self.ether_data, index)))
+
+    def apply_ether_nodes_to_memory(self, *, update_status: bool = True) -> bool:
+        if self.ether_data is None:
+            return False
+        index = self.active_ether_loadout_index()
+        try:
+            nodes = parse_ether_node_ids(self.ether_nodes_var.get())
+            self.ether_data = set_ether_loadout_nodes(self.ether_data, index, nodes)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not apply Ether node IDs:\n{exc}")
+            return False
+        self.refresh_ether_window(index)
+        if update_status:
+            self.set_status(f"Ether loadout {index + 1} staged with {len(nodes)} node entries; not saved yet.")
+        return True
+
+    def reset_selected_ether_loadout(self) -> None:
+        if self.ether_data is None:
+            return
+        index = self.active_ether_loadout_index()
+        if not messagebox.askyesno(APP_TITLE, f"Reset all allocated Ether nodes in loadout {index + 1}?", parent=self.ether_window):
+            return
+        self.ether_data = set_ether_loadout_nodes(self.ether_data, index, [])
+        self.refresh_ether_window(index)
+        self.set_status(f"Ether loadout {index + 1} reset staged; not saved yet.")
+
+    def reset_all_ether_loadouts(self) -> None:
+        if self.ether_data is None:
+            return
+        if not messagebox.askyesno(APP_TITLE, "Reset all allocated Ether nodes in all 8 loadouts?", parent=self.ether_window):
+            return
+        selected = self.active_ether_loadout_index()
+        for index in range(ETHER_LOADOUT_COUNT):
+            self.ether_data = set_ether_loadout_nodes(self.ether_data, index, [])
+        self.refresh_ether_window(selected)
+        self.set_status("All 8 Ether loadout resets staged; not saved yet.")
+
+    def reload_ether_from_disk(self) -> None:
+        if self.ether_path is None:
+            return
+        try:
+            self.ether_data = read_ether_file(self.ether_path)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not reload the Ether sidecar:\n{exc}")
+            return
+        self.refresh_ether_window()
+        self.set_status(f"Reloaded {self.ether_path.name} from disk.")
+
+    def save_ether_changes(self) -> None:
+        if self.ether_path is None or self.ether_data is None:
+            return
+        if not self.apply_ether_nodes_to_memory(update_status=False):
+            return
+        try:
+            backup = write_ether_file(self.ether_path, self.ether_data, create_backup=self.ether_path.exists())
+            self.ether_data = read_ether_file(self.ether_path)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not save the Ether sidecar:\n{exc}")
+            return
+        self.refresh_ether_window()
+        backup_text = backup.name if backup else "none (new file)"
+        self.set_status(f"Saved {self.ether_path.name}. Backup: {backup_text}.")
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Ether tree saved successfully.\n\n{self.ether_path}\n\nBackup:\n{backup}",
+            parent=self.ether_window,
+        )
+
+    def close_ether_window(self) -> None:
+        if self.ether_window is not None and self.ether_window.winfo_exists():
+            self.ether_window.destroy()
+        self.ether_window = None
+        self.ether_loadout_list = None
+        self.ether_path = None
+        self.ether_data = None
+        self.ether_nodes_var.set("")
 
     def merge_character_field_vars_into_text(self, text: str) -> str:
         for spec, var in self.field_vars.items():
@@ -1539,6 +2469,22 @@ def run_roundtrip_test(paths: list[Path]) -> bool:
     return ok
 
 
+def default_character_save_paths() -> list[Path]:
+    paths = list(DEFAULT_SAVE_DIR.glob("herosiege*.hss"))
+    nested = DEFAULT_SAVE_DIR / "hs2saves"
+    if nested.is_dir():
+        paths.extend(nested.glob("herosiege*.hss"))
+    readable: list[Path] = []
+    for path in sorted(set(paths), key=lambda candidate: save_slot_sort_key(str(candidate))):
+        try:
+            text = decode_hss_file(path)
+        except HssFormatError:
+            continue
+        if classify_text(text, path) == "character_ini":
+            readable.append(path)
+    return readable
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=APP_TITLE)
     parser.add_argument("--self-test", nargs="*", type=Path, help="Decode and re-encode selected .hss files.")
@@ -1548,7 +2494,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     if args.self_test is not None:
-        paths = args.self_test or list(DEFAULT_SAVE_DIR.glob("*.hss"))
+        paths = args.self_test or default_character_save_paths()
         return 0 if run_roundtrip_test(paths) else 1
 
     root = Tk()
