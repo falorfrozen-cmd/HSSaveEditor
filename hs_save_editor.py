@@ -40,7 +40,8 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_TITLE = "Hero Siege Character Save Editor"
+APP_VERSION = "1.1.1"
+APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
 S10_ACT_COUNT = 9
@@ -304,8 +305,8 @@ CLASS_ID_TO_NAME = {
     15: "Marauder",
     16: "Plague Doctor",
     17: "Shield Lancer",
-    18: "Illusionist",
-    19: "Jötunn",
+    18: "Jötunn",
+    19: "Illusionist",
     20: "Exo",
     21: "Butcher",
     22: "Stormweaver",
@@ -834,28 +835,55 @@ def summarize_item_stat_slots(data: dict, db_path: Path | None) -> str:
     return "; ".join(lines)
 
 
+def campaign_marker(text: str, key: str, default: int = 0) -> int:
+    """Read a numeric campaign marker without allowing malformed save values."""
+    raw = get_ini_value(text, "0", key)
+    if raw == "":
+        return default
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid campaign marker {key}={raw!r}.") from exc
+
+
+def set_campaign_marker_at_least(text: str, key: str, target: int) -> str:
+    """Raise a campaign marker while preserving higher legitimate progress."""
+    value = max(campaign_marker(text, key), target)
+    return set_ini_value(text, "0", key, str(value), "number")
+
+
+def selected_difficulty_waypoint_marker(text: str) -> int:
+    """Convert the zero-based selected difficulty to its one-based waypoint tier."""
+    difficulty = campaign_marker(text, "difficulty")
+    if not 0 <= difficulty < S10_MAX_CAMPAIGN_CLEAR:
+        raise ValueError(f"Unsupported selected difficulty value: {difficulty}.")
+    return difficulty + 1
+
+
 def unlock_all_waypoints(text: str) -> str:
-    """Unlock every campaign waypoint stored by the Season 10 save schema."""
+    """Unlock S10 waypoints only for the currently selected difficulty.
+
+    ``act_9`` is deliberately excluded: Hero Siege uses it as the campaign-clear
+    gate for unlocking difficulties. Act 9 itself is reachable through Act 8
+    progress and its own zone markers.
+    """
+    target = selected_difficulty_waypoint_marker(text)
     for act in range(1, S10_ACT_COUNT + 1):
-        text = set_ini_value(text, "0", f"act_{act}", str(S10_MAX_CAMPAIGN_CLEAR), "number")
+        if act < S10_ACT_COUNT:
+            text = set_campaign_marker_at_least(text, f"act_{act}", target)
         for zone in range(S10_ZONE_SLOTS_PER_ACT):
-            text = set_ini_value(
-                text,
-                "0",
-                f"zone{act},{zone}",
-                str(S10_MAX_CAMPAIGN_CLEAR),
-                "number",
-            )
+            text = set_campaign_marker_at_least(text, f"zone{act},{zone}", target)
     return text
 
 
 def unlock_all_difficulties(text: str) -> str:
     """Unlock all four S10 difficulties without changing the selected one.
 
-    Season 10 gates progression on the Act 9 campaign-clear value. The legacy
-    Hell 1-5 fields and hard-coded quest slots are intentionally left untouched.
+    Season 10 gates difficulty selection on the Act 9 campaign-clear value.
+    Waypoint/zone markers, the selected difficulty, legacy Hell 1-5 fields and
+    hard-coded quest slots are intentionally left untouched.
     """
-    return unlock_all_waypoints(text)
+    return set_campaign_marker_at_least(text, "act_9", S10_MAX_CAMPAIGN_CLEAR)
 
 
 def unlock_inferno_difficulty(text: str) -> str:
@@ -1575,7 +1603,7 @@ class HssEditorApp:
 
         self.make_button(
             unlock_actions,
-            "Unlock All Waypoints",
+            "Unlock Waypoints (Current Difficulty)",
             self.apply_unlock_all_waypoints,
             bg=UI_WAYPOINT,
             active_bg=UI_WAYPOINT_DARK,
@@ -2047,7 +2075,10 @@ class HssEditorApp:
             return
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
-        self.set_status("Season 10 waypoints (Acts 1-9) unlocked in raw text. Save With Backup to write the file.")
+        self.set_status(
+            "Season 10 waypoints unlocked for the selected difficulty; "
+            "Act 9 campaign-clear progress was preserved. Save With Backup to write the file."
+        )
 
     def apply_unlock_all_difficulties(self) -> None:
         if not self.loaded:
@@ -2064,8 +2095,8 @@ class HssEditorApp:
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
         self.set_status(
-            "Normal, Nightmare, Hell and Inferno unlocked through Act 9 progress. "
-            "Current difficulty was preserved. Save With Backup to write the file."
+            "Normal, Nightmare, Hell and Inferno unlocked through the Act 9 campaign gate. "
+            "Current difficulty and waypoint progress were preserved. Save With Backup to write the file."
         )
 
     def apply_unlock_inferno_difficulty(self) -> None:

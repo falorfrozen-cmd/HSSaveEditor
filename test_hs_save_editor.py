@@ -20,6 +20,10 @@ item_0=""
 
 
 class Season10ProgressTests(unittest.TestCase):
+    def test_class_ids_match_current_game_assets(self):
+        self.assertEqual(editor.CLASS_ID_TO_NAME[18], "Jötunn")
+        self.assertEqual(editor.CLASS_ID_TO_NAME[19], "Illusionist")
+
     def test_character_and_shop_fields_still_write_expected_sections(self):
         character = SAMPLE_SAVE
         shop = editor.default_shop_ini_text()
@@ -37,18 +41,32 @@ class Season10ProgressTests(unittest.TestCase):
             for extra_key in spec.extra_keys:
                 self.assertEqual(editor.get_ini_value(shop, spec.section, extra_key), "77.000000")
 
-    def test_waypoints_cover_full_s10_schema(self):
+    def test_waypoints_cover_current_s10_difficulty_without_clearing_act_9(self):
         result = editor.unlock_all_waypoints(SAMPLE_SAVE)
+        self.assertEqual(editor.get_ini_value(result, "0", "difficulty"), "1.000000")
+        for act in range(1, 9):
+            self.assertEqual(editor.get_ini_value(result, "0", f"act_{act}"), "2.000000")
+        self.assertEqual(editor.get_ini_value(result, "0", "act_9"), "")
         for act in range(1, 10):
-            self.assertEqual(editor.get_ini_value(result, "0", f"act_{act}"), "4.000000")
             for zone in range(10):
-                self.assertEqual(editor.get_ini_value(result, "0", f"zone{act},{zone}"), "4.000000")
+                self.assertEqual(editor.get_ini_value(result, "0", f"zone{act},{zone}"), "2.000000")
 
-    def test_difficulty_unlock_preserves_current_selection_and_legacy_value(self):
+    def test_waypoint_unlock_preserves_higher_progress(self):
+        existing = editor.set_ini_value(SAMPLE_SAVE, "0", "act_1", "3", "number")
+        existing = editor.set_ini_value(existing, "0", "act_9", "1", "number")
+        existing = editor.set_ini_value(existing, "0", "zone1,0", "4", "number")
+        result = editor.unlock_all_waypoints(existing)
+        self.assertEqual(editor.get_ini_value(result, "0", "act_1"), "3.000000")
+        self.assertEqual(editor.get_ini_value(result, "0", "act_9"), "1.000000")
+        self.assertEqual(editor.get_ini_value(result, "0", "zone1,0"), "4.000000")
+
+    def test_difficulty_unlock_only_changes_act_9_campaign_gate(self):
         result = editor.unlock_all_difficulties(SAMPLE_SAVE)
         self.assertEqual(editor.get_ini_value(result, "0", "difficulty"), "1.000000")
         self.assertEqual(editor.get_ini_value(result, "0", "hell_subdifficulty"), "5.000000")
         self.assertEqual(editor.get_ini_value(result, "0", "act_9"), "4.000000")
+        self.assertEqual(editor.get_ini_value(result, "0", "act_1"), "0.000000")
+        self.assertEqual(editor.get_ini_value(result, "0", "zone1,0"), "0.000000")
 
     def test_charm_unlock_preserves_unrelated_quest_slots(self):
         result = editor.unlock_charm_slots(SAMPLE_SAVE)

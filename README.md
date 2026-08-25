@@ -30,8 +30,8 @@ The game must be fully closed before opening, editing, or saving a character fil
 - Edits character name, class, level, hero level, experience, gold, wormhole level, and professions.
 - Reads/writes gold and profession values through `hs2saves/shop.ini`, matching the way Hero Siege stores those shared values.
 - Shows class names instead of class numbers.
-- Unlocks all Season 10 act/zone waypoints, including Act 9 and the expanded zone slots.
-- Unlocks the current Normal, Nightmare, Hell, and Inferno progression without changing the selected difficulty.
+- Unlocks all Season 10 act/zone waypoints only for the currently selected difficulty, including Act 9 and the expanded zone slots, without marking the Act 9 campaign as cleared.
+- Unlocks Normal, Nightmare, Hell, and Inferno through the native Act 9 campaign-clear gate without changing the selected difficulty or waypoint table.
 - Unlocks the complete native 30-cell charm grid by completing Season 10's `Light of Dawn` reward state (`fallOfDarkness|4`). Legacy synthetic `charmSlot` fields from older editor builds are removed automatically.
 - Sets the character to exactly 800 total earned Ether Points through the game's nine native Ether quest-chain progress records.
 - Preserves already allocated nodes; the displayed unspent balance is therefore `800 - allocated nodes`.
@@ -51,6 +51,11 @@ The game must be fully closed before opening, editing, or saving a character fil
 Backups are created next to the edited save file.
 
 Gold and profession changes are saved to `shop.ini` in the same save folder. The editor finds it automatically.
+
+Difficulty and waypoint unlocks are intentionally separate. To unlock every
+difficulty and then every waypoint, unlock all difficulties first, select and
+save the character on Inferno in-game, then run **Unlock Waypoints (Current
+Difficulty)** once. The Inferno waypoint tier also covers the lower difficulties.
 
 ## Steam Deck / Proton Notes
 
