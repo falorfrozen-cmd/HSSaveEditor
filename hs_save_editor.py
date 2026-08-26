@@ -1078,9 +1078,21 @@ def apply_subtalent_allocations(
             raise ValueError(f"Talent t{talent_id} is not a verified allocated active skill.")
         if len(small_ranks) != len(S10_SMALL_SUBTALENT_NODE_IDS):
             raise ValueError(f"Talent t{talent_id} must provide exactly ten small-node ranks.")
-        if any(not isinstance(rank, int) or not 0 <= rank <= 5 for rank in small_ranks):
-            raise ValueError(f"Talent t{talent_id} has a small-node rank outside 0-5.")
-        if sum(small_ranks) > 50:
+        nodes = trees.get(f"t{talent_id}", {})
+        for node_id, rank in zip(S10_SMALL_SUBTALENT_NODE_IDS, small_ranks):
+            if not isinstance(rank, int) or rank < 0:
+                raise ValueError(f"Talent t{talent_id} has an invalid small-node rank.")
+            if rank <= 5:
+                continue
+            try:
+                saved_rank = float(nodes.get(f"s{node_id}"))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"Talent t{talent_id} cannot create a new small-node rank above 5."
+                ) from exc
+            if saved_rank != float(rank):
+                raise ValueError(f"Talent t{talent_id} cannot create a new small-node rank above 5.")
+        if sum(min(rank, 5) for rank in small_ranks) > 50:
             raise ValueError(f"Talent t{talent_id} exceeds the 50-point small-node budget.")
         if major_node_id is not None and major_node_id not in S10_MAJOR_SUBTALENT_NODE_IDS:
             raise ValueError(f"Talent t{talent_id} has an invalid major node s{major_node_id}.")
@@ -2692,18 +2704,21 @@ class HssEditorApp:
             return
 
         working: dict[int, tuple[list[int], int | None]] = {}
+        has_bonus_ranks = False
         for definition in definitions:
             nodes = trees.get(f"t{definition.talent_id}", {})
             small_ranks: list[int] = []
             for node_id in S10_SMALL_SUBTALENT_NODE_IDS:
                 try:
-                    rank = int(float(nodes.get(f"s{node_id}", 0)))
+                    rank_value = float(nodes.get(f"s{node_id}", 0))
                 except (TypeError, ValueError, OverflowError) as exc:
                     messagebox.showerror(APP_TITLE, f"{definition.skill_name} has invalid saved data.\n\n{exc}")
                     return
-                if not 0 <= rank <= 5:
-                    messagebox.showerror(APP_TITLE, f"{definition.skill_name} has a point value outside 0-5.")
+                if rank_value < 0 or not rank_value.is_integer():
+                    messagebox.showerror(APP_TITLE, f"{definition.skill_name} has an invalid saved point value.")
                     return
+                rank = int(rank_value)
+                has_bonus_ranks = has_bonus_ranks or rank > 5
                 small_ranks.append(rank)
             selected_major = next(
                 (
@@ -2745,6 +2760,16 @@ class HssEditorApp:
             fg=UI_MUTED,
             bg=UI_BG,
         ).pack(fill=X, pady=(4, 12))
+        if has_bonus_ranks:
+            Label(
+                wrapper,
+                text="Bonus ranks above 5 were found. They will be kept unless you change them.",
+                anchor="w",
+                justify="left",
+                wraplength=730,
+                fg=UI_NOTICE,
+                bg=UI_BG,
+            ).pack(fill=X, pady=(0, 10))
 
         definition_by_label: dict[str, SubtalentTreeDefinition] = {}
         for definition in definitions:
@@ -2767,6 +2792,7 @@ class HssEditorApp:
         node_frame = Frame(wrapper, bg=UI_CARD, padx=14, pady=12)
         node_frame.pack(fill=BOTH, expand=True)
         node_labels: list[Label] = []
+        rank_combos: list[ttk.Combobox] = []
         rank_vars = [StringVar(value="0") for _ in S10_SMALL_SUBTALENT_NODE_IDS]
         for index, node_id in enumerate(S10_SMALL_SUBTALENT_NODE_IDS):
             column_group = 0 if index < 5 else 1
@@ -2781,14 +2807,16 @@ class HssEditorApp:
             )
             label.grid(row=row, column=base_column, sticky="w", padx=(0, 8), pady=5)
             node_labels.append(label)
-            ttk.Combobox(
+            rank_combo = ttk.Combobox(
                 node_frame,
                 textvariable=rank_vars[index],
                 values=("0", "1", "2", "3", "4", "5"),
                 width=4,
                 state="readonly",
                 style="Modern.TCombobox",
-            ).grid(row=row, column=base_column + 1, sticky="e", padx=(0, 28), pady=5)
+            )
+            rank_combo.grid(row=row, column=base_column + 1, sticky="e", padx=(0, 28), pady=5)
+            rank_combos.append(rank_combo)
         node_frame.columnconfigure(0, weight=1)
         node_frame.columnconfigure(3, weight=1)
 
@@ -2824,7 +2852,7 @@ class HssEditorApp:
 
         def refresh_total(*_args: object) -> None:
             try:
-                total = sum(int(variable.get()) for variable in rank_vars)
+                total = sum(min(int(variable.get()), 5) for variable in rank_vars)
             except ValueError:
                 total = 0
             total_var.set(f"Points used: {total} / 50")
@@ -2835,9 +2863,13 @@ class HssEditorApp:
                 ranks = [int(variable.get()) for variable in rank_vars]
             except ValueError:
                 if show_error:
-                    messagebox.showerror(APP_TITLE, "Choose a value from 0 to 5 for every upgrade.", parent=window)
+                    messagebox.showerror(APP_TITLE, "Choose one of the listed values for every upgrade.", parent=window)
                 return False
-            total = sum(ranks)
+            if any(rank < 0 for rank in ranks):
+                if show_error:
+                    messagebox.showerror(APP_TITLE, "Upgrade points cannot be negative.", parent=window)
+                return False
+            total = sum(min(rank, 5) for rank in ranks)
             if total > 50:
                 if show_error:
                     messagebox.showerror(APP_TITLE, f"{definition.skill_name} uses {total} points. The maximum is 50.", parent=window)
@@ -2849,8 +2881,12 @@ class HssEditorApp:
         def load_current() -> None:
             definition = definition_by_label[current_label[0]]
             ranks, major_node_id = working[definition.talent_id]
-            for index, (label, variable, rank) in enumerate(zip(node_labels, rank_vars, ranks)):
+            for index, (label, variable, combo, rank) in enumerate(zip(node_labels, rank_vars, rank_combos, ranks)):
                 label.configure(text=definition.node_names[index])
+                values = ["0", "1", "2", "3", "4", "5"]
+                if rank > 5:
+                    values.append(str(rank))
+                combo.configure(values=tuple(values))
                 variable.set(str(rank))
             major_choice_ids.clear()
             major_choice_ids[no_major_label] = None
@@ -2880,7 +2916,8 @@ class HssEditorApp:
 
         def set_small_ranks(rank: int) -> None:
             for variable in rank_vars:
-                variable.set(str(rank))
+                current = int(variable.get())
+                variable.set(str(max(current, rank) if rank == 5 else rank))
             refresh_total()
 
         def stage_allocations() -> None:

@@ -314,6 +314,42 @@ class Season10ProgressTests(unittest.TestCase):
         self.assertTrue(all(decoded["t220"][f"s{node_id}"] == 5.0 for node_id in range(1, 11)))
         self.assertEqual(decoded["t221"], other_tree)
 
+    def test_apply_subtalent_allocations_preserves_existing_bonus_rank_above_five(self):
+        original = {"t220": {"s1": 7.0, "s2": 2.0, "s13": 3.0}}
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save += (
+            "\n[talent_loadout_0]\n"
+            f'subtalents="{editor.encode_base64_json(original)}"\n'
+        )
+
+        result, _, _ = editor.apply_subtalent_allocations(
+            save,
+            {220: ((7, 5, 0, 0, 0, 0, 0, 0, 0, 0), 13)},
+            loadout_index=0,
+            verified_talent_ids={220},
+        )
+        decoded = editor.decode_subtalent_map(result, 0)
+
+        self.assertEqual(decoded["t220"]["s1"], 7.0)
+        self.assertEqual(decoded["t220"]["s2"], 5.0)
+        self.assertEqual(decoded["t220"]["s13"], 3.0)
+
+    def test_apply_subtalent_allocations_rejects_new_rank_above_five(self):
+        original = {"t220": {"s1": 5.0}}
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save += (
+            "\n[talent_loadout_0]\n"
+            f'subtalents="{editor.encode_base64_json(original)}"\n'
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot create a new small-node rank above 5"):
+            editor.apply_subtalent_allocations(
+                save,
+                {220: ((7, 0, 0, 0, 0, 0, 0, 0, 0, 0), None)},
+                loadout_index=0,
+                verified_talent_ids={220},
+            )
+
     def test_apply_subtalent_allocations_rejects_unverified_skill(self):
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
         with self.assertRaisesRegex(ValueError, "not a verified allocated active skill"):
