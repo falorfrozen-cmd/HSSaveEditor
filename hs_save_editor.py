@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import shutil
 import sqlite3
+import sys
 import zlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,7 +42,7 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.6"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
@@ -58,6 +60,13 @@ CHARM_SLOT_MAX_CELLS = 30
 LEGACY_CHARM_SLOT_SAVE_SECTION = "0"
 LEGACY_CHARM_SLOT_SAVE_KEY = "charmSlot"
 S10_TARGET_TOTAL_ETHER_POINTS = 800
+S10_TALENT_LOADOUT_COUNT = 8
+# Every current S10 sub-skill tree has fourteen local nodes. The first ten are
+# the ordinary 5-rank nodes; s11-s14 are the mutually exclusive major nodes
+# and must never be changed by the small-node forge action.
+S10_SMALL_SUBTALENT_NODE_IDS = tuple(range(1, 11))
+S10_MAJOR_SUBTALENT_NODE_IDS = tuple(range(11, 15))
+S10_SMALL_SUBTALENT_MAX_RANK = 5.0
 # S10 awards Ether through 25 quests. A completed quest advances its chain by
 # two save stages; the values below are the native final progress for each
 # chain. Difficulty is metadata for newly-created questlog slots.
@@ -103,6 +112,8 @@ UI_PURPLE = "#7136b8"
 UI_PURPLE_DARK = "#522489"
 UI_ETHER = "#159bb2"
 UI_ETHER_DARK = "#0d6e80"
+UI_SUBTALENT = "#2f8f5b"
+UI_SUBTALENT_DARK = "#216b43"
 
 
 def normalize_line_endings(text: str) -> str:
@@ -268,6 +279,13 @@ class FieldSpec:
     default_value: str = ""
 
 
+@dataclass(frozen=True)
+class SubtalentTreeDefinition:
+    talent_id: int
+    skill_name: str
+    node_names: tuple[str, ...]
+
+
 CHARACTER_FIELDS = [
     FieldSpec("Name", "0", "name"),
     FieldSpec("Class", "0", "class", "number"),
@@ -315,6 +333,32 @@ CLASS_ID_TO_NAME = {
 }
 CLASS_NAME_TO_ID = {name.lower(): class_id for class_id, name in CLASS_ID_TO_NAME.items()}
 CLASS_DISPLAY_VALUES = [CLASS_ID_TO_NAME[i] for i in sorted(CLASS_ID_TO_NAME)]
+CLASS_ID_TO_TRANSLATION_PREFIX = {
+    1: "Viking",
+    2: "Pyromancer",
+    3: "Marksman",
+    4: "Pirate",
+    5: "Nomad",
+    6: "Redneck",
+    7: "Necromancer",
+    8: "Samurai",
+    9: "Paladin",
+    10: "Amazon",
+    11: "DemonSlayer",
+    12: "Demonspawn",
+    13: "Shaman",
+    14: "WhiteMage",
+    15: "Marauder",
+    16: "PlagueDoctor",
+    17: "ShieldLancer",
+    18: "Jotunn",
+    19: "Illusionist",
+    20: "Exo",
+    21: "Butcher",
+    22: "Stormweaver",
+    23: "Bard",
+    24: "Prophet",
+}
 
 
 def xor_bytes(data: bytes) -> bytes:
@@ -659,6 +703,22 @@ def set_field_value(text: str, spec: FieldSpec, value: str) -> str:
     return text
 
 
+def is_odyssey_character(text: str) -> bool:
+    """Return the native local-character Odyssey flag."""
+    raw = get_ini_value(text, "0", "soloselffound") or "0"
+    try:
+        return parse_number(raw) != 0
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Invalid Odyssey flag: {raw!r}.") from exc
+
+
+def convert_character_to_odyssey(text: str) -> str:
+    """Enable Odyssey without changing character progress or equipment."""
+    if not get_ini_value(text, "0", "class"):
+        raise ValueError("The save has no character class field.")
+    return set_ini_value(text, "0", "soloselffound", "1", "number")
+
+
 def is_shop_backed_field(spec: FieldSpec) -> bool:
     return spec.section == "gold" or spec in PROFESSION_FIELDS
 
@@ -703,6 +763,356 @@ def encode_base64_json(value: object) -> str:
     return base64.b64encode(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode(
         "ascii"
     )
+
+
+def active_talent_loadout_index(text: str) -> int:
+    """Return the character's active S10 talent loadout as a zero-based index."""
+    raw = get_ini_value(text, "0", "talent_loadout") or "0"
+    try:
+        value = parse_number(raw)
+        index = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Invalid talent loadout value: {raw!r}.") from exc
+    if value != index or not 0 <= index < S10_TALENT_LOADOUT_COUNT:
+        raise ValueError(
+            f"Talent loadout must be between 0 and {S10_TALENT_LOADOUT_COUNT - 1}: {raw!r}."
+        )
+    return index
+
+
+def decode_subtalent_map(text: str, loadout_index: int) -> dict[str, dict[str, object]]:
+    """Decode one loadout's saved sub-skill allocations without inventing trees."""
+    if not 0 <= loadout_index < S10_TALENT_LOADOUT_COUNT:
+        raise ValueError(f"Talent loadout must be between 0 and {S10_TALENT_LOADOUT_COUNT - 1}.")
+    encoded = get_ini_value(text, f"talent_loadout_{loadout_index}", "subtalents")
+    if not encoded:
+        return {}
+    decoded = decode_base64_json(encoded)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"Talent loadout {loadout_index + 1} has an invalid subtalents payload.")
+
+    clean: dict[str, dict[str, object]] = {}
+    for talent_key, nodes in decoded.items():
+        if not isinstance(talent_key, str) or not re.fullmatch(r"t\d+", talent_key):
+            raise ValueError(f"Invalid sub-skill tree key in loadout {loadout_index + 1}: {talent_key!r}.")
+        if not isinstance(nodes, dict):
+            raise ValueError(f"Sub-skill tree {talent_key} is not a node map.")
+        clean[talent_key] = nodes
+    return clean
+
+
+def allocated_talent_ids(text: str, loadout_index: int) -> set[int]:
+    """Return non-zero talent IDs allocated in one S10 loadout."""
+    section_name = f"talent_loadout_{loadout_index}"
+    body = next((body for name, body in iter_ini_sections(text) if name == section_name), "")
+    allocated: set[int] = set()
+    for match in re.finditer(r'(?m)^\s*talent_(\d+)\s*=\s*"?([+-]?[\d.]+)"?\s*$', body):
+        try:
+            value = float(match.group(2))
+        except ValueError:
+            continue
+        if value > 0:
+            allocated.add(int(match.group(1)))
+    return allocated
+
+
+def _read_translation_text(path: Path) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1254", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def game_translation_file_pair() -> tuple[Path, Path] | None:
+    """Locate the installed game's current talent and subtalent translations."""
+    roots: list[Path] = [Path(sys.executable).resolve().parent, Path.cwd()]
+    for variable in ("ProgramFiles(x86)", "ProgramFiles"):
+        value = os.environ.get(variable)
+        if value:
+            roots.append(Path(value) / "Steam" / "steamapps" / "common" / "HeroSiege" / "bin")
+    roots.append(Path(r"C:\Program Files (x86)\Steam\steamapps\common\HeroSiege\bin"))
+
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            root = root.resolve()
+        except OSError:
+            continue
+        if root in seen:
+            continue
+        seen.add(root)
+        talent_path = root / "translationsTalent.csv"
+        subtalent_path = root / "translationsSubTalent.csv"
+        if talent_path.is_file() and subtalent_path.is_file():
+            return talent_path, subtalent_path
+    return None
+
+
+def active_subtalent_offsets_from_translations(
+    class_prefix: str,
+    talent_text: str,
+    subtalent_text: str,
+) -> tuple[int, ...]:
+    """Resolve active-skill positions inside a class's native 18-talent block."""
+    parent_pattern = re.compile(
+        rf"^sub{re.escape(class_prefix)}(.+?)(\d{{1,2}})\|",
+        re.IGNORECASE,
+    )
+    parents: set[str] = set()
+    for line in subtalent_text.splitlines():
+        match = parent_pattern.match(line.strip())
+        if not match:
+            continue
+        local_id = int(match.group(2))
+        if 1 <= local_id <= 14:
+            parents.add(match.group(1).casefold())
+    if not parents:
+        raise ValueError(f"No subskill definitions were found for {class_prefix}.")
+
+    talent_keys: list[str] = []
+    for line in talent_text.splitlines():
+        key = line.split("|", 1)[0].strip()
+        if key.startswith("talent_name_"):
+            talent_keys.append(key.removeprefix("talent_name_"))
+    if len(talent_keys) < 18:
+        raise ValueError("The talent translation table is incomplete.")
+
+    best_start = -1
+    best_score = -1
+    for start in range(len(talent_keys) - 17):
+        score = sum(key.casefold() in parents for key in talent_keys[start : start + 18])
+        if score > best_score:
+            best_start = start
+            best_score = score
+    minimum_score = min(3, len(parents))
+    if best_start < 0 or best_score < minimum_score:
+        raise ValueError(f"Could not align the {class_prefix} subskill definitions to its talent block.")
+
+    offsets = tuple(
+        offset
+        for offset, key in enumerate(talent_keys[best_start : best_start + 18])
+        if key.casefold() in parents
+    )
+    if not offsets:
+        raise ValueError(f"No active {class_prefix} talent offsets were resolved.")
+    return offsets
+
+
+def subtalent_tree_definitions_from_translations(
+    class_prefix: str,
+    class_id: int,
+    talent_text: str,
+    subtalent_text: str,
+) -> tuple[SubtalentTreeDefinition, ...]:
+    """Resolve localized node names for every active skill in one class block."""
+    parent_pattern = re.compile(
+        rf"^sub{re.escape(class_prefix)}(.+?)(\d{{1,2}})\|",
+        re.IGNORECASE,
+    )
+    node_names: dict[str, dict[int, str]] = {}
+    for line in subtalent_text.splitlines():
+        stripped = line.strip()
+        match = parent_pattern.match(stripped)
+        if not match:
+            continue
+        node_id = int(match.group(2))
+        if not 1 <= node_id <= 14:
+            continue
+        parts = stripped.split("|")
+        english_name = parts[1].strip() if len(parts) > 1 else ""
+        node_names.setdefault(match.group(1).casefold(), {})[node_id] = english_name
+    if not node_names:
+        raise ValueError(f"No subskill definitions were found for {class_prefix}.")
+
+    talent_rows: list[tuple[str, str]] = []
+    for line in talent_text.splitlines():
+        parts = line.strip().split("|")
+        key = parts[0].strip() if parts else ""
+        if not key.startswith("talent_name_"):
+            continue
+        skill_key = key.removeprefix("talent_name_")
+        skill_name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else skill_key
+        talent_rows.append((skill_key, skill_name))
+    if len(talent_rows) < 18:
+        raise ValueError("The talent translation table is incomplete.")
+
+    best_start = -1
+    best_score = -1
+    for start in range(len(talent_rows) - 17):
+        score = sum(key.casefold() in node_names for key, _ in talent_rows[start : start + 18])
+        if score > best_score:
+            best_start = start
+            best_score = score
+    minimum_score = min(3, len(node_names))
+    if best_start < 0 or best_score < minimum_score:
+        raise ValueError(f"Could not align the {class_prefix} subskill definitions to its talent block.")
+
+    class_block_start = 2 + (class_id - 1) * 18
+    definitions: list[SubtalentTreeDefinition] = []
+    for offset, (skill_key, skill_name) in enumerate(talent_rows[best_start : best_start + 18]):
+        names = node_names.get(skill_key.casefold())
+        if names is None:
+            continue
+        definitions.append(
+            SubtalentTreeDefinition(
+                talent_id=class_block_start + offset,
+                skill_name=skill_name,
+                node_names=tuple(names.get(node_id) or f"Node s{node_id}" for node_id in range(1, 15)),
+            )
+        )
+    return tuple(definitions)
+
+
+def resolve_allocated_subtalent_definitions(
+    text: str,
+    loadout_index: int,
+    translation_pair: tuple[Path, Path] | None = None,
+) -> tuple[SubtalentTreeDefinition, ...]:
+    """Resolve allocated active skills and their current localized node names."""
+    class_raw = get_ini_value(text, "0", "class")
+    try:
+        class_id = int(parse_number(class_raw))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Invalid character class value: {class_raw!r}.") from exc
+    class_prefix = CLASS_ID_TO_TRANSLATION_PREFIX.get(class_id)
+    if not class_prefix:
+        raise ValueError(f"Unsupported character class ID: {class_id}.")
+    pair = game_translation_file_pair() if translation_pair is None else translation_pair
+    if pair is None:
+        raise ValueError("The current game's talent translation files could not be located.")
+    definitions = subtalent_tree_definitions_from_translations(
+        class_prefix,
+        class_id,
+        _read_translation_text(pair[0]),
+        _read_translation_text(pair[1]),
+    )
+    allocated = allocated_talent_ids(text, loadout_index)
+    return tuple(definition for definition in definitions if definition.talent_id in allocated)
+
+
+def resolve_allocated_subtalent_ids(
+    text: str,
+    loadout_index: int,
+    translation_pair: tuple[Path, Path] | None = None,
+) -> set[int]:
+    """Resolve allocated active skills without treating passive talents as trees."""
+    class_raw = get_ini_value(text, "0", "class")
+    try:
+        class_id = int(parse_number(class_raw))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Invalid character class value: {class_raw!r}.") from exc
+    class_prefix = CLASS_ID_TO_TRANSLATION_PREFIX.get(class_id)
+    if not class_prefix:
+        raise ValueError(f"Unsupported character class ID: {class_id}.")
+
+    pair = game_translation_file_pair() if translation_pair is None else translation_pair
+    if pair is None:
+        raise ValueError("The current game's talent translation files could not be located.")
+    talent_path, subtalent_path = pair
+    offsets = active_subtalent_offsets_from_translations(
+        class_prefix,
+        _read_translation_text(talent_path),
+        _read_translation_text(subtalent_path),
+    )
+
+    # Season 10 reserves talent IDs 0 and 1, then stores exactly 18 IDs per
+    # class in class-ID order. Verified against native Shaman (218) and Bard
+    # (398) saves; translation files determine which positions are active.
+    class_block_start = 2 + (class_id - 1) * 18
+    active_ids = {class_block_start + offset for offset in offsets}
+    return active_ids & allocated_talent_ids(text, loadout_index)
+
+
+def max_small_subtalent_nodes(
+    text: str,
+    loadout_index: int | None = None,
+    create_talent_ids: set[int] | None = None,
+) -> tuple[str, int, int]:
+    """Max s1-s10 in resolved trees while preserving s11-s14 exactly.
+
+    Missing trees are created only for caller-provided, verified active talent
+    IDs. Passive talents never receive fabricated sub-skill data.
+    """
+    index = active_talent_loadout_index(text) if loadout_index is None else loadout_index
+    trees = decode_subtalent_map(text, index)
+    for talent_id in sorted(create_talent_ids or set()):
+        if talent_id < 0:
+            raise ValueError(f"Invalid active talent ID: {talent_id}.")
+        trees.setdefault(f"t{talent_id}", {})
+    changed_nodes = 0
+    for nodes in trees.values():
+        for node_id in S10_SMALL_SUBTALENT_NODE_IDS:
+            key = f"s{node_id}"
+            current = nodes.get(key)
+            if current is not None:
+                try:
+                    current_rank = float(current)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(f"Invalid small sub-skill rank {key}={current!r}.") from exc
+                if current_rank >= S10_SMALL_SUBTALENT_MAX_RANK:
+                    continue
+            nodes[key] = S10_SMALL_SUBTALENT_MAX_RANK
+            changed_nodes += 1
+
+    if not trees:
+        return text, 0, 0
+    encoded = encode_base64_json(trees)
+    text = set_ini_value(text, f"talent_loadout_{index}", "subtalents", encoded, "text")
+    return text, len(trees), changed_nodes
+
+
+def apply_subtalent_allocations(
+    text: str,
+    allocations: dict[int, tuple[tuple[int, ...], int | None]],
+    loadout_index: int | None = None,
+    verified_talent_ids: set[int] | None = None,
+) -> tuple[str, int, int]:
+    """Write explicit small-node ranks and one optional 3/3 major per skill."""
+    index = active_talent_loadout_index(text) if loadout_index is None else loadout_index
+    trees = decode_subtalent_map(text, index)
+    changed_nodes = 0
+    for talent_id, (small_ranks, major_node_id) in allocations.items():
+        if verified_talent_ids is not None and talent_id not in verified_talent_ids:
+            raise ValueError(f"Talent t{talent_id} is not a verified allocated active skill.")
+        if len(small_ranks) != len(S10_SMALL_SUBTALENT_NODE_IDS):
+            raise ValueError(f"Talent t{talent_id} must provide exactly ten small-node ranks.")
+        if any(not isinstance(rank, int) or not 0 <= rank <= 5 for rank in small_ranks):
+            raise ValueError(f"Talent t{talent_id} has a small-node rank outside 0-5.")
+        if sum(small_ranks) > 50:
+            raise ValueError(f"Talent t{talent_id} exceeds the 50-point small-node budget.")
+        if major_node_id is not None and major_node_id not in S10_MAJOR_SUBTALENT_NODE_IDS:
+            raise ValueError(f"Talent t{talent_id} has an invalid major node s{major_node_id}.")
+
+        nodes = trees.setdefault(f"t{talent_id}", {})
+        for node_id, rank in zip(S10_SMALL_SUBTALENT_NODE_IDS, small_ranks):
+            key = f"s{node_id}"
+            previous = nodes.get(key)
+            if rank == 0:
+                if key in nodes:
+                    nodes.pop(key)
+                    changed_nodes += 1
+            elif previous is None or float(previous) != float(rank):
+                nodes[key] = float(rank)
+                changed_nodes += 1
+
+        for node_id in S10_MAJOR_SUBTALENT_NODE_IDS:
+            key = f"s{node_id}"
+            if node_id == major_node_id:
+                previous = nodes.get(key)
+                if previous is None or float(previous) != 3.0:
+                    nodes[key] = 3.0
+                    changed_nodes += 1
+            elif key in nodes:
+                nodes.pop(key)
+                changed_nodes += 1
+
+    if not allocations:
+        return text, 0, 0
+    encoded = encode_base64_json(trees)
+    text = set_ini_value(text, f"talent_loadout_{index}", "subtalents", encoded, "text")
+    return text, len(allocations), changed_nodes
 
 
 def decode_item_stat_slot(value: object) -> dict[str, int] | None:
@@ -1457,7 +1867,7 @@ class HssEditorApp:
         )
         current_file_label.pack(fill=X, pady=(2, 5))
 
-        help_text = "Open a character .hss file, edit the fields, then press Save With Backup. Empty fields are not written."
+        help_text = "Open a character, make your changes, then save. A backup is created automatically."
         Label(content, text=help_text, wraplength=720, justify="left", fg=UI_MUTED, bg=UI_BG).pack(
             anchor="w", pady=(0, 9)
         )
@@ -1479,9 +1889,7 @@ class HssEditorApp:
             font=("Segoe UI Semibold", 9),
         ).pack(anchor="w")
         notice_text = (
-            "This editor is intended for offline/single-player character saves only. "
-            "Do not use it with multiplayer, online characters, leaderboards, trading, "
-            "or anti-cheat protected modes."
+            "Use this editor only with offline characters. Do not use edited characters online."
         )
         notice_label = Label(
             notice_frame,
@@ -1566,7 +1974,7 @@ class HssEditorApp:
 
         actions = LabelFrame(
             content,
-            text="  SAVE OPERATIONS  ",
+            text="  SAVE  ",
             padx=8,
             pady=8,
             bg=UI_BG,
@@ -1577,10 +1985,10 @@ class HssEditorApp:
         actions.pack(fill=X, pady=(8, 4))
         for column in range(3):
             actions.columnconfigure(column, weight=1, uniform="save_action")
-        self.make_button(actions, "Reload From Disk", self.reload_current).grid(
+        self.make_button(actions, "Undo Unsaved Changes", self.reload_current).grid(
             row=0, column=0, sticky="ew", padx=(0, 4)
         )
-        self.make_button(actions, "SAVE WITH BACKUP", self.save_current, accent=True).grid(
+        self.make_button(actions, "SAVE CHARACTER", self.save_current, accent=True).grid(
             row=0, column=1, sticky="ew", padx=4
         )
         self.make_button(actions, "Save As...", self.save_as).grid(
@@ -1589,7 +1997,7 @@ class HssEditorApp:
 
         unlock_actions = LabelFrame(
             content,
-            text="  SEASON 10 PROGRESSION FORGE  ",
+            text="  CHARACTER TOOLS  ",
             padx=8,
             pady=8,
             bg=UI_BG,
@@ -1603,7 +2011,7 @@ class HssEditorApp:
 
         self.make_button(
             unlock_actions,
-            "Unlock Waypoints (Current Difficulty)",
+            "Unlock Waypoints",
             self.apply_unlock_all_waypoints,
             bg=UI_WAYPOINT,
             active_bg=UI_WAYPOINT_DARK,
@@ -1611,13 +2019,13 @@ class HssEditorApp:
         ).grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=(0, 5))
         self.make_button(
             unlock_actions,
-            "Unlock All Difficulties (S10)",
+            "Unlock All Difficulties",
             self.apply_unlock_all_difficulties,
             danger=True,
         ).grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=(0, 5))
         self.make_button(
             unlock_actions,
-            "Unlock All Charm Slots (30 Max)",
+            "Unlock All Charm Slots",
             self.apply_unlock_charm_slots,
             bg=UI_PURPLE,
             active_bg=UI_PURPLE_DARK,
@@ -1625,12 +2033,28 @@ class HssEditorApp:
         ).grid(row=1, column=0, sticky="ew", padx=(0, 5), pady=(5, 0))
         self.make_button(
             unlock_actions,
-            "Set Total Ether Points to 800",
+            "Give 800 Ether Points",
             self.apply_unlock_all_ether_points,
             bg=UI_ETHER,
             active_bg=UI_ETHER_DARK,
             fg="#ecfeff",
         ).grid(row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
+        self.make_button(
+            unlock_actions,
+            "Edit Subskills",
+            self.open_subtalent_editor,
+            bg=UI_SUBTALENT,
+            active_bg=UI_SUBTALENT_DARK,
+            fg="#ecfdf5",
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.make_button(
+            unlock_actions,
+            "Convert to Odyssey",
+            self.apply_convert_to_odyssey,
+            bg=UI_PURPLE,
+            active_bg=UI_PURPLE_DARK,
+            fg="#f5f3ff",
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
         status_frame = Frame(
             content,
@@ -1680,7 +2104,7 @@ class HssEditorApp:
         self.file_list_paths.clear()
         if not self.save_dir.exists():
             self.slot_summary.set("SAVE DIRECTORY NOT FOUND")
-            self.set_status(f"Folder does not exist: {self.save_dir}")
+            self.set_status("Save folder not found. Choose the correct Hero Siege save folder.")
             return
 
         display_paths: list[tuple[str, Path]] = []
@@ -1700,7 +2124,7 @@ class HssEditorApp:
             self.file_list_paths[label] = _path.resolve()
             self.file_list.insert(END, label)
         self.slot_summary.set(f"{populated_count} CHARACTERS  •  {len(display_paths)} SLOT FILES")
-        self.set_status(f"Found {len(display_paths)} character .hss files.")
+        self.set_status(f"Found {populated_count} character(s).")
 
     def _path_from_file_list_entry(self, entry: str) -> Path:
         mapped = self.file_list_paths.get(entry)
@@ -1714,7 +2138,7 @@ class HssEditorApp:
     def open_selected_file(self) -> None:
         selection = self.file_list.curselection()
         if not selection:
-            messagebox.showinfo(APP_TITLE, "Select a .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Select a character first.")
             return
         self.load_file(self._path_from_file_list_entry(self.file_list.get(selection[0])))
 
@@ -1734,10 +2158,9 @@ class HssEditorApp:
             if isinstance(exc, HssFormatError):
                 messagebox.showinfo(
                     APP_TITLE,
-                    f"{path.name} is not a readable character save slot.\n\n"
-                    f"{exc}\n\n"
-                    "On Steam Deck/Proton, make sure you select the real Hero Siege save folder for the "
-                    "same Proton prefix/account that the game is using. Empty slots can be ignored.",
+                    f"{path.name} is not a usable character save.\n\n"
+                    "It may be an empty slot or the wrong save folder."
+                    f"\n\nDetails: {exc}",
                 )
             else:
                 messagebox.showerror(APP_TITLE, f"Could not open {path.name}:\n{exc}")
@@ -1747,22 +2170,20 @@ class HssEditorApp:
         if file_kind != "character_ini":
             messagebox.showwarning(
                 APP_TITLE,
-                f"{path.name} does not look like a character save.\n\n"
-                "This simplified editor only edits offline character .hss files.",
+                f"{path.name} is not an offline character save.",
             )
             return
 
         shop_path, shop_text = read_shop_ini_near_character(path)
         self.loaded = LoadedSave(path=path, text=text, file_kind=file_kind, shop_path=shop_path, shop_text=shop_text)
-        self.current_file.set(f"{path}  ({file_kind})")
+        self.current_file.set(str(path))
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False)
-        shop_note = f" Shop data: {shop_path.name}." if shop_text is not None else " No shop.ini found; one will be created if shop-backed fields are saved."
-        self.set_status(f"Loaded {path.name}.{shop_note}")
+        self.set_status(f"Opened {get_ini_value(text, '0', 'name') or path.name}. Ready to edit.")
 
     def reload_current(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         self.load_file(self.loaded.path)
 
@@ -1784,7 +2205,7 @@ class HssEditorApp:
 
     def open_inventory_inspector(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         if self.inventory_window is not None and self.inventory_window.winfo_exists():
             self.inventory_window.lift()
@@ -1945,7 +2366,7 @@ class HssEditorApp:
 
     def open_raw_window(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         if self.raw_window is not None and self.raw_window.winfo_exists():
             self.raw_window.lift()
@@ -2036,7 +2457,7 @@ class HssEditorApp:
 
     def populate_fields_from_raw(self, show_errors: bool = True, update_status: bool = True) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
 
         text = self.get_raw()
@@ -2063,7 +2484,7 @@ class HssEditorApp:
 
     def apply_unlock_all_waypoints(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         try:
             text = self.get_raw()
@@ -2075,14 +2496,11 @@ class HssEditorApp:
             return
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
-        self.set_status(
-            "Season 10 waypoints unlocked for the selected difficulty; "
-            "Act 9 campaign-clear progress was preserved. Save With Backup to write the file."
-        )
+        self.set_status("Waypoints are ready. Click Save Character to finish.")
 
     def apply_unlock_all_difficulties(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         try:
             text = self.get_raw()
@@ -2094,18 +2512,48 @@ class HssEditorApp:
             return
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
-        self.set_status(
-            "Normal, Nightmare, Hell and Inferno unlocked through the Act 9 campaign gate. "
-            "Current difficulty and waypoint progress were preserved. Save With Backup to write the file."
-        )
+        self.set_status("All difficulties are ready. Click Save Character to finish.")
 
     def apply_unlock_inferno_difficulty(self) -> None:
         """Compatibility wrapper retained for older UI integrations."""
         self.apply_unlock_all_difficulties()
 
+    def apply_convert_to_odyssey(self) -> None:
+        if not self.loaded:
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
+            return
+        try:
+            text = self.get_raw()
+            if self._character_field_vars_dirty:
+                text = self.merge_character_field_vars_into_text(text)
+            already_odyssey = is_odyssey_character(text)
+            character_name = get_ini_value(text, "0", "name") or self.loaded.path.name
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not read the Odyssey state:\n{exc}")
+            return
+        if already_odyssey:
+            messagebox.showinfo(APP_TITLE, f"{character_name} is already an Odyssey character.")
+            return
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Convert {character_name} to Odyssey?\n\n"
+            "Your character and items will stay the same.\n\n"
+            "You still need to click Save Character.",
+            parent=self.root,
+        ):
+            return
+        try:
+            text = convert_character_to_odyssey(text)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not convert the character to Odyssey:\n{exc}")
+            return
+        self.set_raw(text)
+        self.populate_fields_from_raw(show_errors=False, update_status=False)
+        self.set_status(f"{character_name} is ready for Odyssey. Click Save Character to finish.")
+
     def apply_unlock_charm_slots(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         try:
             text = self.get_raw()
@@ -2117,15 +2565,11 @@ class HssEditorApp:
             return
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
-        self.set_status(
-            "Light of Dawn was completed with Season 10's native fallOfDarkness|4 state. "
-            f"The full native {CHARM_SLOT_MAX_CELLS}-cell charm grid is staged and obsolete charmSlot fields were removed. "
-            "Save With Backup to write the file."
-        )
+        self.set_status("All 30 charm slots are ready. Click Save Character to finish.")
 
     def apply_unlock_all_ether_points(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         try:
             ether_path = ether_path_for_character(self.loaded.path)
@@ -2133,17 +2577,15 @@ class HssEditorApp:
             active_loadout = self.active_ether_loadout_index()
             allocated_nodes = len(ether_loadout_nodes(ether_data, active_loadout))
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Could not read the active Ether loadout:\n{exc}")
+            messagebox.showerror(APP_TITLE, f"Could not read the Ether Tree:\n{exc}")
             return
         target_earned = S10_TARGET_TOTAL_ETHER_POINTS
         expected_available = max(0, target_earned - allocated_nodes)
         if not messagebox.askyesno(
             APP_TITLE,
-            f"Set this character to {target_earned} total earned Ether Points?\n\n"
-            f"Allocated nodes: {allocated_nodes}\n"
-            f"Expected available balance: {expected_available}\n\n"
-            "Existing Ether Tree node allocations will be preserved. "
-            "The change is not written until Save With Backup.",
+            f"Give this character {target_earned} total Ether Points?\n\n"
+            f"Points available after current upgrades: {expected_available}\n\n"
+            "Your current Ether upgrades will stay the same. You still need to click Save Character.",
             parent=self.root,
         ):
             return
@@ -2157,12 +2599,352 @@ class HssEditorApp:
             return
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False, update_status=False)
+        self.set_status(f"{target_earned} Ether Points are ready. Click Save Character to finish.")
+
+    def apply_max_small_subtalents(self) -> None:
+        if not self.loaded:
+            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            return
+        try:
+            text = self.get_raw()
+            if self._character_field_vars_dirty:
+                text = self.merge_character_field_vars_into_text(text)
+            loadout_index = active_talent_loadout_index(text)
+            trees = decode_subtalent_map(text, loadout_index)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not read the active subskill loadout:\n{exc}")
+            return
+
+        resolution_warning = ""
+        try:
+            resolved_ids = resolve_allocated_subtalent_ids(text, loadout_index)
+        except Exception as exc:
+            resolved_ids = set()
+            resolution_warning = str(exc)
+
+        existing_ids = {int(key[1:]) for key in trees}
+        target_ids = existing_ids | resolved_ids
+        missing_ids = resolved_ids - existing_ids
+        if not target_ids:
+            details = f"\n\nResolver: {resolution_warning}" if resolution_warning else ""
+            messagebox.showinfo(
+                APP_TITLE,
+                f"Talent loadout {loadout_index + 1} has no allocated active subskill trees."
+                f"{details}",
+            )
+            return
+
+        resolver_note = ""
+        if resolution_warning:
+            resolver_note = (
+                f"\n\nAdaptive resolver warning: {resolution_warning}\n"
+                "Only trees already present in the save will be changed."
+            )
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Max every small node (s1-s10) in {len(target_ids)} allocated active subskill tree(s) "
+            f"on talent loadout {loadout_index + 1}?\n\n"
+            f"Existing trees: {len(existing_ids)}\n"
+            f"Verified missing trees to create: {len(missing_ids)}\n\n"
+            "Large/special nodes s11-s14 will be preserved exactly and will not be unlocked or changed.\n\n"
+            f"The change is not written until Save With Backup.{resolver_note}",
+            parent=self.root,
+        ):
+            return
+
+        try:
+            text, tree_count, changed_nodes = max_small_subtalent_nodes(
+                text,
+                loadout_index,
+                create_talent_ids=resolved_ids,
+            )
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not max the small subskill nodes:\n{exc}")
+            return
+        self.set_raw(text)
+        self.populate_fields_from_raw(show_errors=False, update_status=False)
         self.set_status(
-            f"{target_earned} total earned Ether Points are staged for loadout "
-            f"{active_loadout + 1} ({expected_available} available, {allocated_nodes} allocated). "
-            "Existing Ether node allocations were preserved. "
+            f"Staged {changed_nodes} small-node rank changes across {tree_count} tree(s) in talent "
+            f"loadout {loadout_index + 1}; created {len(missing_ids)} verified missing tree(s). "
+            "Large nodes s11-s14 were preserved. "
             "Press Save With Backup to write the character save."
         )
+
+    def open_subtalent_editor(self) -> None:
+        if not self.loaded:
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
+            return
+        try:
+            text = self.get_raw()
+            if self._character_field_vars_dirty:
+                text = self.merge_character_field_vars_into_text(text)
+            loadout_index = active_talent_loadout_index(text)
+            trees = decode_subtalent_map(text, loadout_index)
+            definitions = resolve_allocated_subtalent_definitions(text, loadout_index)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not open the subskills:\n{exc}")
+            return
+        if not definitions:
+            messagebox.showinfo(
+                APP_TITLE,
+                "This character has no active skills to edit.",
+            )
+            return
+
+        working: dict[int, tuple[list[int], int | None]] = {}
+        for definition in definitions:
+            nodes = trees.get(f"t{definition.talent_id}", {})
+            small_ranks: list[int] = []
+            for node_id in S10_SMALL_SUBTALENT_NODE_IDS:
+                try:
+                    rank = int(float(nodes.get(f"s{node_id}", 0)))
+                except (TypeError, ValueError, OverflowError) as exc:
+                    messagebox.showerror(APP_TITLE, f"{definition.skill_name} has invalid saved data.\n\n{exc}")
+                    return
+                if not 0 <= rank <= 5:
+                    messagebox.showerror(APP_TITLE, f"{definition.skill_name} has a point value outside 0-5.")
+                    return
+                small_ranks.append(rank)
+            selected_major = next(
+                (
+                    node_id
+                    for node_id in S10_MAJOR_SUBTALENT_NODE_IDS
+                    if float(nodes.get(f"s{node_id}", 0) or 0) > 0
+                ),
+                None,
+            )
+            working[definition.talent_id] = (small_ranks, selected_major)
+
+        window = Toplevel(self.root)
+        window.title("Edit Subskills")
+        window.geometry("780x650")
+        window.minsize(720, 600)
+        window.configure(bg=UI_BG)
+        window.transient(self.root)
+        window.grab_set()
+
+        wrapper = Frame(window, padx=18, pady=16, bg=UI_BG)
+        wrapper.pack(fill=BOTH, expand=True)
+        Label(
+            wrapper,
+            text="EDIT SUBSKILLS",
+            anchor="w",
+            fg=UI_GOLD_BRIGHT,
+            bg=UI_BG,
+            font=("Segoe UI Semibold", 16),
+        ).pack(fill=X)
+        Label(
+            wrapper,
+            text=(
+                "Choose a skill, spend up to 50 points on its small upgrades, then choose one "
+                "major upgrade. Click Apply Changes when you are done."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=730,
+            fg=UI_MUTED,
+            bg=UI_BG,
+        ).pack(fill=X, pady=(4, 12))
+
+        definition_by_label: dict[str, SubtalentTreeDefinition] = {}
+        for definition in definitions:
+            label = definition.skill_name
+            option = 2
+            while label in definition_by_label:
+                label = f"{definition.skill_name} (Option {option})"
+                option += 1
+            definition_by_label[label] = definition
+        skill_var = StringVar(value=next(iter(definition_by_label)))
+        selector = ttk.Combobox(
+            wrapper,
+            textvariable=skill_var,
+            values=tuple(definition_by_label),
+            state="readonly",
+            style="Modern.TCombobox",
+        )
+        selector.pack(fill=X, pady=(0, 12))
+
+        node_frame = Frame(wrapper, bg=UI_CARD, padx=14, pady=12)
+        node_frame.pack(fill=BOTH, expand=True)
+        node_labels: list[Label] = []
+        rank_vars = [StringVar(value="0") for _ in S10_SMALL_SUBTALENT_NODE_IDS]
+        for index, node_id in enumerate(S10_SMALL_SUBTALENT_NODE_IDS):
+            column_group = 0 if index < 5 else 1
+            row = index if index < 5 else index - 5
+            base_column = column_group * 3
+            label = Label(
+                node_frame,
+                text=f"s{node_id}",
+                anchor="w",
+                fg=UI_TEXT,
+                bg=UI_CARD,
+            )
+            label.grid(row=row, column=base_column, sticky="w", padx=(0, 8), pady=5)
+            node_labels.append(label)
+            ttk.Combobox(
+                node_frame,
+                textvariable=rank_vars[index],
+                values=("0", "1", "2", "3", "4", "5"),
+                width=4,
+                state="readonly",
+                style="Modern.TCombobox",
+            ).grid(row=row, column=base_column + 1, sticky="e", padx=(0, 28), pady=5)
+        node_frame.columnconfigure(0, weight=1)
+        node_frame.columnconfigure(3, weight=1)
+
+        total_var = StringVar(value="Points used: 0 / 50")
+        Label(
+            node_frame,
+            textvariable=total_var,
+            anchor="w",
+            fg=UI_NOTICE,
+            bg=UI_CARD,
+            font=("Segoe UI Semibold", 10),
+        ).grid(row=5, column=0, columnspan=5, sticky="w", pady=(12, 6))
+
+        no_major_label = "No major upgrade"
+        major_var = StringVar(value=no_major_label)
+        major_choice_ids: dict[str, int | None] = {no_major_label: None}
+        Label(
+            node_frame,
+            text="Major upgrade (automatically maxed)",
+            anchor="w",
+            fg=UI_GOLD_BRIGHT,
+            bg=UI_CARD,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 5))
+        major_combo = ttk.Combobox(
+            node_frame,
+            textvariable=major_var,
+            state="readonly",
+            style="Modern.TCombobox",
+        )
+        major_combo.grid(row=7, column=0, columnspan=5, sticky="ew", pady=(0, 10))
+
+        current_label = [skill_var.get()]
+
+        def refresh_total(*_args: object) -> None:
+            try:
+                total = sum(int(variable.get()) for variable in rank_vars)
+            except ValueError:
+                total = 0
+            total_var.set(f"Points used: {total} / 50")
+
+        def store_current(show_error: bool = True) -> bool:
+            definition = definition_by_label[current_label[0]]
+            try:
+                ranks = [int(variable.get()) for variable in rank_vars]
+            except ValueError:
+                if show_error:
+                    messagebox.showerror(APP_TITLE, "Choose a value from 0 to 5 for every upgrade.", parent=window)
+                return False
+            total = sum(ranks)
+            if total > 50:
+                if show_error:
+                    messagebox.showerror(APP_TITLE, f"{definition.skill_name} uses {total} points. The maximum is 50.", parent=window)
+                return False
+            major_node_id = major_choice_ids.get(major_var.get())
+            working[definition.talent_id] = (ranks, major_node_id)
+            return True
+
+        def load_current() -> None:
+            definition = definition_by_label[current_label[0]]
+            ranks, major_node_id = working[definition.talent_id]
+            for index, (label, variable, rank) in enumerate(zip(node_labels, rank_vars, ranks)):
+                label.configure(text=definition.node_names[index])
+                variable.set(str(rank))
+            major_choice_ids.clear()
+            major_choice_ids[no_major_label] = None
+            selected_major_label = no_major_label
+            major_values = [no_major_label]
+            for node_id in S10_MAJOR_SUBTALENT_NODE_IDS:
+                choice_label = definition.node_names[node_id - 1]
+                if choice_label in major_choice_ids:
+                    choice_label = f"{choice_label} (Option {node_id - 10})"
+                major_choice_ids[choice_label] = node_id
+                major_values.append(choice_label)
+                if node_id == major_node_id:
+                    selected_major_label = choice_label
+            major_combo.configure(values=major_values)
+            major_var.set(selected_major_label)
+            refresh_total()
+
+        def change_skill(_event: object) -> None:
+            new_label = skill_var.get()
+            if new_label == current_label[0]:
+                return
+            if not store_current():
+                skill_var.set(current_label[0])
+                return
+            current_label[0] = new_label
+            load_current()
+
+        def set_small_ranks(rank: int) -> None:
+            for variable in rank_vars:
+                variable.set(str(rank))
+            refresh_total()
+
+        def stage_allocations() -> None:
+            if not store_current():
+                return
+            allocations = {
+                talent_id: (tuple(ranks), major_node_id)
+                for talent_id, (ranks, major_node_id) in working.items()
+            }
+            major_count = sum(major_node_id is not None for _, major_node_id in working.values())
+            if not messagebox.askyesno(
+                APP_TITLE,
+                "Apply these subskill changes?\n\n"
+                f"Major upgrades selected: {major_count}\n\n"
+                "You still need to click Save Character in the main window.",
+                parent=window,
+            ):
+                return
+            try:
+                updated, tree_count, changed_nodes = apply_subtalent_allocations(
+                    text,
+                    allocations,
+                    loadout_index,
+                    verified_talent_ids={definition.talent_id for definition in definitions},
+                )
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Could not apply the subskill changes:\n{exc}", parent=window)
+                return
+            self.set_raw(updated)
+            self.populate_fields_from_raw(show_errors=False, update_status=False)
+            self.set_status("Subskill changes are ready. Click Save Character to finish.")
+            window.destroy()
+
+        for variable in rank_vars:
+            variable.trace_add("write", refresh_total)
+        selector.bind("<<ComboboxSelected>>", change_skill)
+        load_current()
+
+        quick_actions = Frame(wrapper, bg=UI_BG)
+        quick_actions.pack(fill=X, pady=(12, 6))
+        self.make_button(
+            quick_actions,
+            "Max Small Upgrades",
+            lambda: set_small_ranks(5),
+            bg=UI_CARD,
+            active_bg=UI_BORDER,
+            fg=UI_TEXT,
+        ).pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        self.make_button(
+            quick_actions,
+            "Clear Small Upgrades",
+            lambda: set_small_ranks(0),
+            bg=UI_CARD,
+            active_bg=UI_BORDER,
+            fg=UI_TEXT,
+        ).pack(side=LEFT, fill=X, expand=True, padx=(5, 0))
+        self.make_button(
+            wrapper,
+            "Apply Changes",
+            stage_allocations,
+            bg=UI_SUBTALENT,
+            active_bg=UI_SUBTALENT_DARK,
+            fg="#ecfdf5",
+        ).pack(fill=X, pady=(6, 0))
 
     def active_ether_loadout_index(self) -> int:
         if self.ether_loadout_list is not None and self.ether_loadout_list.winfo_exists():
@@ -2180,7 +2962,7 @@ class HssEditorApp:
 
     def open_ether_window(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
         try:
             self.ether_path = ether_path_for_character(self.loaded.path)
@@ -2399,7 +3181,7 @@ class HssEditorApp:
 
     def prepared_texts_for_save(self, shop_path: Path | None = None) -> tuple[str, str | None] | None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return None
         try:
             text = self.get_raw()
@@ -2414,12 +3196,12 @@ class HssEditorApp:
                 shop_text = self.merge_shop_field_vars_into_text(shop_text)
             return text, shop_text
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Character fields could not be saved:\n{exc}")
+            messagebox.showerror(APP_TITLE, f"Could not prepare the character:\n{exc}")
             return None
 
     def save_current(self, *, show_success_dialog: bool = True) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
 
         prepared = self.prepared_texts_for_save(self.loaded.shop_path)
@@ -2439,15 +3221,16 @@ class HssEditorApp:
         self.loaded = LoadedSave(self.loaded.path, text, classify_text(text, self.loaded.path), self.loaded.shop_path, shop_text)
         self.set_raw(text)
         self._character_field_vars_dirty = False
-        shop_part = f" Shop.ini backup: {shop_backup.name if shop_backup else 'none'}." if shop_text is not None else ""
-        self.set_status(f"Saved: {self.loaded.path.resolve()}. Backup: {backup.name if backup else 'none'}.{shop_part}")
+        backup_name = backup.name if backup else "No backup needed"
+        shop_part = f" Shop backup: {shop_backup.name if shop_backup else 'not needed'}." if shop_text is not None else ""
+        self.set_status(f"Character saved. Backup: {backup_name}.{shop_part}")
         if show_success_dialog:
-            extra = f"\n\nShop data:\n{self.loaded.shop_path}\nBackup:\n{shop_backup}" if shop_text is not None else ""
-            messagebox.showinfo(APP_TITLE, f"Saved successfully.\n\n{self.loaded.path.resolve()}\n\nBackup:\n{backup}{extra}")
+            extra = f"\nShop backup: {shop_backup.name if shop_backup else 'not needed'}" if shop_text is not None else ""
+            messagebox.showinfo(APP_TITLE, f"Character saved successfully.\n\nBackup: {backup_name}{extra}")
 
     def save_as(self) -> None:
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character .hss file first.")
+            messagebox.showinfo(APP_TITLE, "Open a character first.")
             return
 
         selected = filedialog.asksaveasfilename(
@@ -2471,14 +3254,14 @@ class HssEditorApp:
             if shop_text is not None and shop_path is not None:
                 write_plain_ini_file(shop_path, shop_text, create_backup=shop_path.exists())
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Save As failed:\n{exc}")
+            messagebox.showerror(APP_TITLE, f"Could not save the character:\n{exc}")
             return
 
         self.loaded = LoadedSave(path, text, classify_text(text, path), shop_path, shop_text)
-        self.current_file.set(f"{path}  ({self.loaded.file_kind})")
+        self.current_file.set(str(path))
         self.set_raw(text)
         self._character_field_vars_dirty = False
-        self.set_status(f"Saved as {path.name}. Backup: {backup.name if backup else 'none'}")
+        self.set_status(f"Saved as {path.name}. Backup: {backup.name if backup else 'not needed'}")
 
     def set_status(self, message: str) -> None:
         self.status.set(message)

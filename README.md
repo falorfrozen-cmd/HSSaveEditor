@@ -2,7 +2,7 @@
 
 A Windows save editor for offline Hero Siege character `.hss` files, presented in a responsive Season 10-inspired Character Save Forge interface.
 
-The editor can load local character saves, edit common character fields, update shared `shop.ini` values such as gold/professions, and unlock Season 10 waypoints, difficulties, and a controlled total of 800 Ether Points. It also creates a backup before saving.
+The editor can load local character saves, edit common character fields, update shared `shop.ini` values such as gold/professions, unlock Season 10 waypoints and difficulties, set a controlled total of 800 Ether Points, and directly edit each active skill's small-node allocation plus its selected major node. It also creates a backup before saving.
 
 ## Download
 
@@ -36,6 +36,12 @@ The game must be fully closed before opening, editing, or saving a character fil
 - Sets the character to exactly 800 total earned Ether Points through the game's nine native Ether quest-chain progress records.
 - Preserves already allocated nodes; the displayed unspent balance is therefore `800 - allocated nodes`.
 - Preserves every existing Ether Tree node allocation in the separate `etherN.hss` sidecar.
+- Reads the installed game's current talent/subtalent translation tables and resolves allocated active skills in the current talent loadout.
+- Converts an existing local character to Odyssey by enabling the game's native `soloselffound` flag while preserving level, equipment, talents and quest progress.
+- Opens a per-skill subskill editor for the current talent loadout. Each of the ten small nodes (`s1-s10`) can be assigned rank 0-5, with a validated 50-point maximum.
+- Lets the player choose one mutually exclusive large/special node (`s11-s14`); the selected node is written directly at 3/3 and the other large nodes for that skill are cleared.
+- Does not depend on the in-game unspent-point counter. The chosen small and major ranks are written directly to the save, so no refund/max round trip is required.
+- Falls back to existing saved trees instead of guessing when the current game tables cannot be located or aligned.
 - Saves with automatic timestamped backup.
 - Standalone Windows `.exe` build available.
 
@@ -45,7 +51,7 @@ The game must be fully closed before opening, editing, or saving a character fil
 2. Run `HeroSiegeSaveEditor.exe`.
 3. Select a character save from the left list.
 4. Edit the fields you want.
-5. Press `Save With Backup`.
+5. Press `Save Character`.
 6. Start the game again.
 
 Backups are created next to the edited save file.

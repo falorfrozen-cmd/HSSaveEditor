@@ -1,3 +1,6 @@
+import base64
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -40,6 +43,20 @@ class Season10ProgressTests(unittest.TestCase):
             self.assertEqual(editor.get_ini_value(shop, spec.section, spec.key), "77.000000")
             for extra_key in spec.extra_keys:
                 self.assertEqual(editor.get_ini_value(shop, spec.section, extra_key), "77.000000")
+
+    def test_convert_character_to_odyssey_only_enables_native_flag(self):
+        normal = editor.set_ini_value(SAMPLE_SAVE, "0", "soloselffound", "0", "number")
+        result = editor.convert_character_to_odyssey(normal)
+        self.assertFalse(editor.is_odyssey_character(normal))
+        self.assertTrue(editor.is_odyssey_character(result))
+        self.assertEqual(editor.get_ini_value(result, "0", "soloselffound"), "1.000000")
+        self.assertEqual(editor.get_ini_value(result, "0", "name"), "Test Hero")
+        self.assertEqual(editor.get_ini_value(result, "0", "class"), "1.000000")
+        self.assertEqual(editor.get_ini_value(result, "0", "level"), "")
+
+    def test_convert_character_to_odyssey_is_idempotent(self):
+        odyssey = editor.set_ini_value(SAMPLE_SAVE, "0", "soloselffound", "1", "number")
+        self.assertEqual(editor.convert_character_to_odyssey(odyssey), odyssey)
 
     def test_waypoints_cover_current_s10_difficulty_without_clearing_act_9(self):
         result = editor.unlock_all_waypoints(SAMPLE_SAVE)
@@ -164,6 +181,206 @@ class Season10ProgressTests(unittest.TestCase):
     def test_s10_ether_sidecar_matches_character_slot(self):
         path = Path(r"C:\save\herosiege19.hss")
         self.assertEqual(editor.ether_path_for_character(path), Path(r"C:\save\ether19.hss"))
+
+    def test_max_small_subtalents_only_changes_s1_through_s10(self):
+        original = {
+            "t220": {
+                "s1": 2.0,
+                "s5": 1.0,
+                "s11": 3.0,
+                "s12": 0.0,
+                "s14": 2.0,
+            }
+        }
+        encoded = base64.b64encode(json.dumps(original, separators=(",", ":")).encode()).decode()
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "1", "number")
+        save = editor.set_ini_value(save, "talent_loadout_1", "subtalents", encoded, "text")
+
+        result, tree_count, changed_nodes = editor.max_small_subtalent_nodes(save)
+        decoded = editor.decode_subtalent_map(result, 1)
+
+        self.assertEqual(tree_count, 1)
+        self.assertEqual(changed_nodes, 10)
+        for node_id in editor.S10_SMALL_SUBTALENT_NODE_IDS:
+            self.assertEqual(decoded["t220"][f"s{node_id}"], 5.0)
+        for node_id in editor.S10_MAJOR_SUBTALENT_NODE_IDS:
+            key = f"s{node_id}"
+            self.assertEqual(decoded["t220"].get(key), original["t220"].get(key))
+
+    def test_max_small_subtalents_preserves_other_loadouts_and_higher_small_ranks(self):
+        active = {"t10": {"s2": 7.0, "s13": 3.0}}
+        inactive = {"t99": {"s1": 1.0, "s11": 3.0}}
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save = editor.set_ini_value(
+            save, "talent_loadout_0", "subtalents", editor.encode_base64_json(active), "text"
+        )
+        save = editor.set_ini_value(
+            save, "talent_loadout_1", "subtalents", editor.encode_base64_json(inactive), "text"
+        )
+
+        result, tree_count, changed_nodes = editor.max_small_subtalent_nodes(save)
+
+        self.assertEqual(tree_count, 1)
+        self.assertEqual(changed_nodes, 9)
+        self.assertEqual(editor.decode_subtalent_map(result, 0)["t10"]["s2"], 7.0)
+        self.assertEqual(editor.decode_subtalent_map(result, 0)["t10"]["s13"], 3.0)
+        self.assertEqual(editor.decode_subtalent_map(result, 1), inactive)
+
+    def test_max_small_subtalents_does_not_invent_missing_skill_trees(self):
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save = editor.set_ini_value(save, "talent_loadout_0", "subtalents", "e30=", "text")
+        result, tree_count, changed_nodes = editor.max_small_subtalent_nodes(save)
+        self.assertEqual(result, save)
+        self.assertEqual((tree_count, changed_nodes), (0, 0))
+
+    def test_max_small_subtalents_creates_only_verified_trees_and_never_major_nodes(self):
+        original = {"t220": {"s11": 3.0, "s14": 0.0}}
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save += (
+            "\n[talent_loadout_0]\n"
+            f'subtalents="{editor.encode_base64_json(original)}"\n'
+        )
+
+        result, tree_count, changed_nodes = editor.max_small_subtalent_nodes(
+            save,
+            create_talent_ids={218, 220},
+        )
+        decoded = editor.decode_subtalent_map(result, 0)
+
+        self.assertEqual(tree_count, 2)
+        self.assertEqual(changed_nodes, 20)
+        self.assertEqual(decoded["t220"]["s11"], 3.0)
+        self.assertEqual(decoded["t220"]["s14"], 0.0)
+        self.assertFalse(any(key in decoded["t218"] for key in ("s11", "s12", "s13", "s14")))
+
+    def test_apply_subtalent_allocations_writes_small_ranks_and_one_major(self):
+        original = {
+            "t220": {
+                "s1": 5.0,
+                "s5": 2.0,
+                "s10": 5.0,
+                "s11": 3.0,
+                "s12": 0.0,
+                "s14": 1.0,
+            }
+        }
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save += (
+            "\n[talent_loadout_0]\n"
+            f'subtalents="{editor.encode_base64_json(original)}"\n'
+        )
+
+        ranks = (5, 4, 3, 2, 1, 0, 0, 0, 0, 0)
+        result, tree_count, changed_nodes = editor.apply_subtalent_allocations(
+            save,
+            {220: (ranks, 13)},
+            loadout_index=0,
+            verified_talent_ids={220},
+        )
+        decoded = editor.decode_subtalent_map(result, 0)
+
+        self.assertEqual(tree_count, 1)
+        self.assertGreater(changed_nodes, 0)
+        for node_id, rank in enumerate(ranks, start=1):
+            if rank:
+                self.assertEqual(decoded["t220"][f"s{node_id}"], float(rank))
+            else:
+                self.assertNotIn(f"s{node_id}", decoded["t220"])
+        self.assertEqual(decoded["t220"]["s13"], 3.0)
+        self.assertNotIn("s11", decoded["t220"])
+        self.assertNotIn("s12", decoded["t220"])
+        self.assertNotIn("s14", decoded["t220"])
+
+    def test_apply_subtalent_allocations_does_not_change_unselected_trees(self):
+        other_tree = {"s1": 2.0, "s14": 3.0}
+        original = {
+            "t220": {**{f"s{node_id}": 5.0 for node_id in range(1, 11)}, "s13": 3.0},
+            "t221": other_tree.copy(),
+        }
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save += (
+            "\n[talent_loadout_0]\n"
+            f'subtalents="{editor.encode_base64_json(original)}"\n'
+        )
+        result, _, _ = editor.apply_subtalent_allocations(
+            save,
+            {220: ((5,) * 10, 12)},
+            loadout_index=0,
+            verified_talent_ids={220},
+        )
+        decoded = editor.decode_subtalent_map(result, 0)
+        self.assertEqual(decoded["t220"]["s12"], 3.0)
+        self.assertNotIn("s13", decoded["t220"])
+        self.assertTrue(all(decoded["t220"][f"s{node_id}"] == 5.0 for node_id in range(1, 11)))
+        self.assertEqual(decoded["t221"], other_tree)
+
+    def test_apply_subtalent_allocations_rejects_unverified_skill(self):
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        with self.assertRaisesRegex(ValueError, "not a verified allocated active skill"):
+            editor.apply_subtalent_allocations(
+                save,
+                {999: ((5,) * 10, 11)},
+                loadout_index=0,
+                verified_talent_ids={220},
+            )
+
+    def test_translation_resolver_aligns_active_skills_inside_eighteen_talent_block(self):
+        keys = [f"passive{index}" for index in range(18)]
+        keys[0] = "TectonicBoulder"
+        keys[4] = "Tornado"
+        keys[17] = "ChaosTotem"
+        talent_text = "\n".join(f"talent_name_{key}|{key}" for key in keys)
+        subtalent_text = "\n".join(
+            [
+                "subShamanTectonicBoulder01|A",
+                "subShamanTectonicBoulder14|B",
+                "subShamanTornado01|C",
+                "subShamanChaosTotem01|D",
+            ]
+        )
+        self.assertEqual(
+            editor.active_subtalent_offsets_from_translations("Shaman", talent_text, subtalent_text),
+            (0, 4, 17),
+        )
+
+    def test_resolver_creates_ids_only_for_allocated_active_shaman_talents(self):
+        keys = [f"passive{index}" for index in range(18)]
+        keys[0] = "TectonicBoulder"
+        keys[4] = "Tornado"
+        keys[17] = "ChaosTotem"
+        talent_text = "\n".join(f"talent_name_{key}|{key}" for key in keys)
+        subtalent_text = "\n".join(
+            [
+                "subShamanTectonicBoulder01|A",
+                "subShamanTornado01|B",
+                "subShamanChaosTotem01|C",
+            ]
+        )
+        save = SAMPLE_SAVE.replace('class="1.000000"', 'class="13.000000"')
+        save += (
+            "\n[talent_loadout_0]\n"
+            'talent_218="1.000000"\n'
+            'talent_219="20.000000"\n'
+            'talent_222="1.000000"\n'
+            'talent_235="1.000000"\n'
+            'subtalents="e30="\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            talent_path = Path(directory) / "translationsTalent.csv"
+            subtalent_path = Path(directory) / "translationsSubTalent.csv"
+            talent_path.write_text(talent_text, encoding="utf-8")
+            subtalent_path.write_text(subtalent_text, encoding="utf-8")
+            resolved = editor.resolve_allocated_subtalent_ids(
+                save,
+                0,
+                (talent_path, subtalent_path),
+            )
+        self.assertEqual(resolved, {218, 222, 235})
+
+    def test_active_talent_loadout_rejects_invalid_values(self):
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "8", "number")
+        with self.assertRaises(ValueError):
+            editor.active_talent_loadout_index(save)
 
 
 if __name__ == "__main__":
