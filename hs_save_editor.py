@@ -49,7 +49,6 @@ DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
 S10_ACT_COUNT = 9
 S10_ZONE_SLOTS_PER_ACT = 10
 S10_MAX_CAMPAIGN_CLEAR = 4
-S10_ETHER_NODE_COUNT = 216
 ETHER_SAVE_VERSION = 1
 ETHER_LOADOUT_COUNT = 8
 QUESTLOG_SECTION = "4"
@@ -629,8 +628,11 @@ def normalize_ether_data(data: object) -> dict[str, object]:
                 node_id = int(node)
             except (TypeError, ValueError) as exc:
                 raise EtherFormatError(f"Ether loadout {index + 1} contains an invalid node ID: {node!r}.") from exc
-            if node_id != node or not 0 <= node_id < S10_ETHER_NODE_COUNT:
-                raise EtherFormatError(f"Ether node ID must be between 0 and {S10_ETHER_NODE_COUNT - 1}: {node!r}.")
+            # Node IDs are assigned by the game and have already expanded from
+            # 0-215 to 0-577 during Season 10. Do not impose a fixed ceiling:
+            # preserving unknown non-negative IDs keeps newer saves readable.
+            if node_id != node or node_id < 0:
+                raise EtherFormatError(f"Ether node ID must be a non-negative whole number: {node!r}.")
             clean_nodes.append(node_id)
         if clean_nodes:
             loadout["nodes"] = clean_nodes
@@ -707,8 +709,8 @@ def parse_ether_node_ids(value: str) -> list[int]:
             node_id = int(token)
         except ValueError as exc:
             raise EtherFormatError(f"Invalid Ether node ID: {token!r}.") from exc
-        if not 0 <= node_id < S10_ETHER_NODE_COUNT:
-            raise EtherFormatError(f"Ether node ID must be between 0 and {S10_ETHER_NODE_COUNT - 1}: {node_id}.")
+        if node_id < 0:
+            raise EtherFormatError(f"Ether node ID must be a non-negative whole number: {node_id}.")
         nodes.append(node_id)
     return nodes
 

@@ -8,10 +8,11 @@
 - Gunner Drone now correctly accepts its two rank-8 upgrades and 56-point total.
 - The Max Small Upgrades action now uses each node's real limit and never changes major upgrades.
 - Unknown future talent IDs are blocked instead of being written with guessed limits.
+- Fixed Ether Tree sidecars containing the current game's node IDs up to 577 being rejected by the editor's obsolete 215 limit; future non-negative node IDs are preserved without a fixed ceiling.
 
 ## Verification
 
-- All 42 automated tests pass.
+- All 44 automated tests pass.
 - Rebuilt and smoke-tested the standalone Windows executable.
 
 Offline/single-player saves only. Close the game before editing and keep the automatic backup.

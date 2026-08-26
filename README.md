@@ -36,6 +36,7 @@ The game must be fully closed before opening, editing, or saving a character fil
 - Sets the character to exactly 800 total earned Ether Points through the game's nine native Ether quest-chain progress records.
 - Preserves already allocated nodes; the displayed unspent balance is therefore `800 - allocated nodes`.
 - Preserves every existing Ether Tree node allocation in the separate `etherN.hss` sidecar.
+- Accepts the game's expanded Ether node IDs without a hard-coded upper limit, so newer valid sidecars remain readable after the tree grows.
 - Reads the installed game's current talent/subtalent translation tables and resolves allocated active skills in the current talent loadout.
 - Converts an existing local character to Odyssey by enabling the game's native `soloselffound` flag while preserving level, equipment, talents and quest progress.
 - Opens a per-skill subskill editor for the current talent loadout. Each of the ten small nodes (`s1-s10`) uses its own game-verified rank cap (1-8 depending on the tree/node); the editor shows the correct total capacity for that skill. Existing out-of-range saved ranks are preserved unless the player changes them.

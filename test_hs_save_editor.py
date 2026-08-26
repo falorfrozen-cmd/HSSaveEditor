@@ -183,9 +183,22 @@ class Season10ProgressTests(unittest.TestCase):
         self.assertEqual(editor.decode_ether_bytes(editor.encode_ether_data(data)), data)
 
     def test_s10_ether_loadout_preserves_order_and_duplicate_node_ids(self):
-        data = editor.set_ether_loadout_nodes(editor.default_ether_data(), 2, [46, 46, 0, 215])
-        self.assertEqual(editor.ether_loadout_nodes(data, 2), [46, 46, 0, 215])
-        self.assertEqual(editor.parse_ether_node_ids("46, 46; 0 215"), [46, 46, 0, 215])
+        data = editor.set_ether_loadout_nodes(editor.default_ether_data(), 2, [46, 46, 0, 577])
+        self.assertEqual(editor.ether_loadout_nodes(data, 2), [46, 46, 0, 577])
+        self.assertEqual(editor.parse_ether_node_ids("46, 46; 0 577"), [46, 46, 0, 577])
+
+    def test_ether_sidecar_preserves_future_node_ids_without_a_fixed_ceiling(self):
+        data = editor.set_ether_loadout_nodes(editor.default_ether_data(), 0, [577, 578, 999])
+        encoded = editor.encode_ether_data(data)
+        self.assertEqual(editor.ether_loadout_nodes(editor.decode_ether_bytes(encoded), 0), [577, 578, 999])
+
+    def test_ether_node_ids_reject_negative_and_fractional_values(self):
+        with self.assertRaises(editor.EtherFormatError):
+            editor.parse_ether_node_ids("-1")
+        invalid = editor.default_ether_data()
+        invalid["loadouts"][0]["nodes"] = [1.5]
+        with self.assertRaises(editor.EtherFormatError):
+            editor.normalize_ether_data(invalid)
 
     def test_s10_ether_sidecar_matches_character_slot(self):
         path = Path(r"C:\save\herosiege19.hss")
