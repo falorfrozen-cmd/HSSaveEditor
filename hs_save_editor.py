@@ -42,7 +42,7 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.2.8"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
@@ -66,7 +66,8 @@ S10_TALENT_LOADOUT_COUNT = 8
 # and must never be changed by the small-node forge action.
 S10_SMALL_SUBTALENT_NODE_IDS = tuple(range(1, 11))
 S10_MAJOR_SUBTALENT_NODE_IDS = tuple(range(11, 15))
-S10_SMALL_SUBTALENT_MAX_RANK = 5.0
+S10_SMALL_SUBTALENT_BALANCED_RANK = 5.0
+S10_SUBTALENT_POINT_BUDGET = 50
 # S10 awards Ether through 25 quests. A completed quest advances its chain by
 # two save stages; the values below are the native final progress for each
 # chain. Difficulty is metadata for newly-created questlog slots.
@@ -870,17 +871,93 @@ def _read_translation_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def game_translation_file_pair() -> tuple[Path, Path] | None:
-    """Locate the installed game's current talent and subtalent translations."""
-    roots: list[Path] = [Path(sys.executable).resolve().parent, Path.cwd()]
+def unique_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        key = str(path).replace("/", "\\").casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def registry_steam_roots() -> list[Path]:
+    """Find Steam itself, including non-default Windows installations."""
+    roots: list[Path] = []
+    if os.name == "nt":
+        try:
+            import winreg
+
+            for hive, key_name in (
+                (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
+            ):
+                try:
+                    with winreg.OpenKey(hive, key_name) as key:
+                        for value_name in ("SteamPath", "InstallPath"):
+                            try:
+                                value, _value_type = winreg.QueryValueEx(key, value_name)
+                            except OSError:
+                                continue
+                            if isinstance(value, str) and value.strip():
+                                roots.append(Path(value))
+                except OSError:
+                    continue
+        except ImportError:
+            pass
     for variable in ("ProgramFiles(x86)", "ProgramFiles"):
         value = os.environ.get(variable)
         if value:
-            roots.append(Path(value) / "Steam" / "steamapps" / "common" / "HeroSiege" / "bin")
-    roots.append(Path(r"C:\Program Files (x86)\Steam\steamapps\common\HeroSiege\bin"))
+            roots.append(Path(value) / "Steam")
+    roots.append(Path(r"C:\Program Files (x86)\Steam"))
+    return unique_paths(roots)
+
+
+def steam_library_roots(steam_roots: list[Path] | None = None) -> list[Path]:
+    """Read every configured Steam library from libraryfolders.vdf."""
+    libraries: list[Path] = []
+    for root in registry_steam_roots() if steam_roots is None else steam_roots:
+        libraries.append(root)
+        vdf_path = root / "steamapps" / "libraryfolders.vdf"
+        try:
+            vdf_text = vdf_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for raw_path in re.findall(r'"path"\s+"([^"]+)"', vdf_text, flags=re.IGNORECASE):
+            libraries.append(Path(raw_path.replace(r"\\", "\\")))
+    return unique_paths(libraries)
+
+
+def hero_siege_install_roots(steam_roots: list[Path] | None = None) -> list[Path]:
+    """Resolve Hero Siege through its Steam manifest and known folder names."""
+    installs: list[Path] = []
+    configured = os.environ.get("HERO_SIEGE_DIR")
+    if configured:
+        installs.append(Path(configured))
+    for library in steam_library_roots(steam_roots):
+        steamapps = library / "steamapps"
+        manifest = steamapps / "appmanifest_269210.acf"
+        try:
+            manifest_text = manifest.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            manifest_text = ""
+        install_match = re.search(r'"installdir"\s+"([^"]+)"', manifest_text, flags=re.IGNORECASE)
+        if install_match:
+            installs.append(steamapps / "common" / install_match.group(1))
+        installs.extend((steamapps / "common" / "HeroSiege", steamapps / "common" / "Hero Siege"))
+    return unique_paths(installs)
+
+
+def game_translation_file_pair() -> tuple[Path, Path] | None:
+    """Locate the installed game's current talent and subtalent translations."""
+    roots: list[Path] = [Path(sys.executable).resolve().parent, Path.cwd()]
+    for install_root in hero_siege_install_roots():
+        roots.extend((install_root, install_root / "bin"))
 
     seen: set[Path] = set()
-    for root in roots:
+    for root in unique_paths(roots):
         try:
             root = root.resolve()
         except OSError:
@@ -1095,7 +1172,7 @@ def max_small_subtalent_nodes(
     loadout_index: int | None = None,
     create_talent_ids: set[int] | None = None,
 ) -> tuple[str, int, int]:
-    """Max s1-s10 in resolved trees while preserving s11-s14 exactly.
+    """Distribute 50 points as rank 5 in s1-s10 and preserve s11-s14.
 
     Missing trees are created only for caller-provided, verified active talent
     IDs. Passive talents never receive fabricated sub-skill data.
@@ -1116,9 +1193,9 @@ def max_small_subtalent_nodes(
                     current_rank = float(current)
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise ValueError(f"Invalid small sub-skill rank {key}={current!r}.") from exc
-                if current_rank >= S10_SMALL_SUBTALENT_MAX_RANK:
+                if current_rank == S10_SMALL_SUBTALENT_BALANCED_RANK:
                     continue
-            nodes[key] = S10_SMALL_SUBTALENT_MAX_RANK
+            nodes[key] = S10_SMALL_SUBTALENT_BALANCED_RANK
             changed_nodes += 1
 
     if not trees:
@@ -1134,7 +1211,7 @@ def apply_subtalent_allocations(
     loadout_index: int | None = None,
     verified_talent_ids: set[int] | None = None,
 ) -> tuple[str, int, int]:
-    """Write explicit small-node ranks and one optional 3/3 major per skill."""
+    """Write up to 50 distributed small-node points and one optional 3/3 major."""
     index = active_talent_loadout_index(text) if loadout_index is None else loadout_index
     trees = decode_subtalent_map(text, index)
     changed_nodes = 0
@@ -1144,20 +1221,12 @@ def apply_subtalent_allocations(
         if len(small_ranks) != len(S10_SMALL_SUBTALENT_NODE_IDS):
             raise ValueError(f"Talent t{talent_id} must provide exactly ten small-node ranks.")
         nodes = trees.get(f"t{talent_id}", {})
-        for node_id, rank in zip(S10_SMALL_SUBTALENT_NODE_IDS, small_ranks):
-            if not isinstance(rank, int) or rank < 0:
-                raise ValueError(f"Talent t{talent_id} has an invalid small-node rank.")
-            if rank <= 5:
-                continue
-            try:
-                saved_rank = float(nodes.get(f"s{node_id}"))
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise ValueError(
-                    f"Talent t{talent_id} cannot create a new small-node rank above 5."
-                ) from exc
-            if saved_rank != float(rank):
-                raise ValueError(f"Talent t{talent_id} cannot create a new small-node rank above 5.")
-        if sum(min(rank, 5) for rank in small_ranks) > 50:
+        if any(
+            not isinstance(rank, int) or not 0 <= rank <= S10_SUBTALENT_POINT_BUDGET
+            for rank in small_ranks
+        ):
+            raise ValueError(f"Talent t{talent_id} has an invalid small-node rank.")
+        if sum(small_ranks) > S10_SUBTALENT_POINT_BUDGET:
             raise ValueError(f"Talent t{talent_id} exceeds the 50-point small-node budget.")
         if major_node_id is not None and major_node_id not in S10_MAJOR_SUBTALENT_NODE_IDS:
             raise ValueError(f"Talent t{talent_id} has an invalid major node s{major_node_id}.")
@@ -1547,6 +1616,7 @@ class HssEditorApp:
         self.field_widgets: dict[FieldSpec, object] = {}
         self._character_field_vars_dirty = False
         self._suppress_field_trace = False
+        self.translation_pair: tuple[Path, Path] | None = None
 
         self.status = StringVar(value="Ready")
         self.current_file = StringVar(value="No character save loaded")
@@ -1558,6 +1628,36 @@ class HssEditorApp:
 
         self._build_layout()
         self.refresh_file_list()
+
+    def locate_translation_pair(self, prompt: bool = False) -> tuple[Path, Path] | None:
+        if self.translation_pair is not None and all(path.is_file() for path in self.translation_pair):
+            return self.translation_pair
+        pair = game_translation_file_pair()
+        if pair is not None:
+            self.translation_pair = pair
+            return pair
+        if not prompt:
+            return None
+        selected = filedialog.askdirectory(
+            title="Select the Hero Siege installation folder",
+            parent=self.root,
+        )
+        if not selected:
+            return None
+        selected_root = Path(selected)
+        for root in (selected_root, selected_root / "bin"):
+            talent_path = root / "translationsTalent.csv"
+            subtalent_path = root / "translationsSubTalent.csv"
+            if talent_path.is_file() and subtalent_path.is_file():
+                self.translation_pair = (talent_path.resolve(), subtalent_path.resolve())
+                return self.translation_pair
+        messagebox.showerror(
+            APP_TITLE,
+            "That folder does not contain the current Hero Siege talent files.\n\n"
+            "Select the HeroSiege folder or its bin folder.",
+            parent=self.root,
+        )
+        return None
 
     def make_button(
         self,
@@ -2694,7 +2794,12 @@ class HssEditorApp:
 
         resolution_warning = ""
         try:
-            resolved_ids = resolve_allocated_subtalent_ids(text, loadout_index)
+            translation_pair = self.locate_translation_pair(prompt=True)
+            if translation_pair is None:
+                raise ValueError(
+                    "Hero Siege's talent files were not found. Select the game's folder when prompted."
+                )
+            resolved_ids = resolve_allocated_subtalent_ids(text, loadout_index, translation_pair)
         except Exception as exc:
             resolved_ids = set()
             resolution_warning = str(exc)
@@ -2757,7 +2862,12 @@ class HssEditorApp:
                 text = self.merge_character_field_vars_into_text(text)
             loadout_index = active_talent_loadout_index(text)
             trees = decode_subtalent_map(text, loadout_index)
-            definitions = resolve_allocated_subtalent_definitions(text, loadout_index)
+            translation_pair = self.locate_translation_pair(prompt=True)
+            if translation_pair is None:
+                raise ValueError(
+                    "Hero Siege's talent files were not found. Select the game's folder when prompted."
+                )
+            definitions = resolve_allocated_subtalent_definitions(text, loadout_index, translation_pair)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"Could not open the subskills:\n{exc}")
             return
@@ -2769,7 +2879,6 @@ class HssEditorApp:
             return
 
         working: dict[int, tuple[list[int], int | None]] = {}
-        has_bonus_ranks = False
         for definition in definitions:
             nodes = trees.get(f"t{definition.talent_id}", {})
             small_ranks: list[int] = []
@@ -2783,7 +2892,6 @@ class HssEditorApp:
                     messagebox.showerror(APP_TITLE, f"{definition.skill_name} has an invalid saved point value.")
                     return
                 rank = int(rank_value)
-                has_bonus_ranks = has_bonus_ranks or rank > 5
                 small_ranks.append(rank)
             selected_major = next(
                 (
@@ -2825,17 +2933,6 @@ class HssEditorApp:
             fg=UI_MUTED,
             bg=UI_BG,
         ).pack(fill=X, pady=(4, 12))
-        if has_bonus_ranks:
-            Label(
-                wrapper,
-                text="Bonus ranks above 5 were found. They will be kept unless you change them.",
-                anchor="w",
-                justify="left",
-                wraplength=730,
-                fg=UI_NOTICE,
-                bg=UI_BG,
-            ).pack(fill=X, pady=(0, 10))
-
         definition_by_label: dict[str, SubtalentTreeDefinition] = {}
         for definition in definitions:
             label = definition.skill_name
@@ -2875,7 +2972,7 @@ class HssEditorApp:
             rank_combo = ttk.Combobox(
                 node_frame,
                 textvariable=rank_vars[index],
-                values=("0", "1", "2", "3", "4", "5"),
+                values=tuple(str(rank) for rank in range(S10_SUBTALENT_POINT_BUDGET + 1)),
                 width=4,
                 state="readonly",
                 style="Modern.TCombobox",
@@ -2917,7 +3014,7 @@ class HssEditorApp:
 
         def refresh_total(*_args: object) -> None:
             try:
-                total = sum(min(int(variable.get()), 5) for variable in rank_vars)
+                total = sum(int(variable.get()) for variable in rank_vars)
             except ValueError:
                 total = 0
             total_var.set(f"Points used: {total} / 50")
@@ -2934,8 +3031,8 @@ class HssEditorApp:
                 if show_error:
                     messagebox.showerror(APP_TITLE, "Upgrade points cannot be negative.", parent=window)
                 return False
-            total = sum(min(rank, 5) for rank in ranks)
-            if total > 50:
+            total = sum(ranks)
+            if total > S10_SUBTALENT_POINT_BUDGET:
                 if show_error:
                     messagebox.showerror(APP_TITLE, f"{definition.skill_name} uses {total} points. The maximum is 50.", parent=window)
                 return False
@@ -2948,8 +3045,8 @@ class HssEditorApp:
             ranks, major_node_id = working[definition.talent_id]
             for index, (label, variable, combo, rank) in enumerate(zip(node_labels, rank_vars, rank_combos, ranks)):
                 label.configure(text=definition.node_names[index])
-                values = ["0", "1", "2", "3", "4", "5"]
-                if rank > 5:
+                values = [str(value) for value in range(S10_SUBTALENT_POINT_BUDGET + 1)]
+                if rank > S10_SUBTALENT_POINT_BUDGET:
                     values.append(str(rank))
                 combo.configure(values=tuple(values))
                 variable.set(str(rank))
@@ -2981,8 +3078,7 @@ class HssEditorApp:
 
         def set_small_ranks(rank: int) -> None:
             for variable in rank_vars:
-                current = int(variable.get())
-                variable.set(str(max(current, rank) if rank == 5 else rank))
+                variable.set(str(rank))
             refresh_total()
 
         def stage_allocations() -> None:
@@ -3025,7 +3121,7 @@ class HssEditorApp:
         quick_actions.pack(fill=X, pady=(12, 6))
         self.make_button(
             quick_actions,
-            "Max Small Upgrades",
+            "Fill 5 Each (50 Points)",
             lambda: set_small_ranks(5),
             bg=UI_CARD,
             active_bg=UI_BORDER,

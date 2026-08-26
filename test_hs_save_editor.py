@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import hs_save_editor as editor
 
@@ -215,7 +216,7 @@ class Season10ProgressTests(unittest.TestCase):
             key = f"s{node_id}"
             self.assertEqual(decoded["t220"].get(key), original["t220"].get(key))
 
-    def test_max_small_subtalents_preserves_other_loadouts_and_higher_small_ranks(self):
+    def test_max_small_subtalents_normalizes_to_five_each_and_preserves_other_loadouts(self):
         active = {"t10": {"s2": 7.0, "s13": 3.0}}
         inactive = {"t99": {"s1": 1.0, "s11": 3.0}}
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
@@ -229,9 +230,10 @@ class Season10ProgressTests(unittest.TestCase):
         result, tree_count, changed_nodes = editor.max_small_subtalent_nodes(save)
 
         self.assertEqual(tree_count, 1)
-        self.assertEqual(changed_nodes, 9)
-        self.assertEqual(editor.decode_subtalent_map(result, 0)["t10"]["s2"], 7.0)
-        self.assertEqual(editor.decode_subtalent_map(result, 0)["t10"]["s13"], 3.0)
+        self.assertEqual(changed_nodes, 10)
+        active_result = editor.decode_subtalent_map(result, 0)["t10"]
+        self.assertTrue(all(active_result[f"s{node_id}"] == 5.0 for node_id in range(1, 11)))
+        self.assertEqual(active_result["s13"], 3.0)
         self.assertEqual(editor.decode_subtalent_map(result, 1), inactive)
 
     def test_max_small_subtalents_does_not_invent_missing_skill_trees(self):
@@ -322,7 +324,7 @@ class Season10ProgressTests(unittest.TestCase):
         self.assertTrue(all(decoded["t220"][f"s{node_id}"] == 5.0 for node_id in range(1, 11)))
         self.assertEqual(decoded["t221"], other_tree)
 
-    def test_apply_subtalent_allocations_preserves_existing_bonus_rank_above_five(self):
+    def test_apply_subtalent_allocations_allows_distributing_more_than_five_to_a_node(self):
         original = {"t220": {"s1": 7.0, "s2": 2.0, "s13": 3.0}}
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
         save += (
@@ -342,7 +344,7 @@ class Season10ProgressTests(unittest.TestCase):
         self.assertEqual(decoded["t220"]["s2"], 5.0)
         self.assertEqual(decoded["t220"]["s13"], 3.0)
 
-    def test_apply_subtalent_allocations_rejects_new_rank_above_five(self):
+    def test_apply_subtalent_allocations_allows_rapidfire_style_rank_eight(self):
         original = {"t220": {"s1": 5.0}}
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
         save += (
@@ -350,13 +352,46 @@ class Season10ProgressTests(unittest.TestCase):
             f'subtalents="{editor.encode_base64_json(original)}"\n'
         )
 
-        with self.assertRaisesRegex(ValueError, "cannot create a new small-node rank above 5"):
+        result, _, _ = editor.apply_subtalent_allocations(
+            save,
+            {220: ((0, 8, 5, 5, 5, 5, 5, 5, 5, 2), None)},
+            loadout_index=0,
+            verified_talent_ids={220},
+        )
+        self.assertEqual(editor.decode_subtalent_map(result, 0)["t220"]["s2"], 8.0)
+
+    def test_apply_subtalent_allocations_rejects_more_than_fifty_total_points(self):
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        with self.assertRaisesRegex(ValueError, "exceeds the 50-point"):
             editor.apply_subtalent_allocations(
                 save,
-                {220: ((7, 0, 0, 0, 0, 0, 0, 0, 0, 0), None)},
+                {220: ((8, 8, 5, 5, 5, 5, 5, 5, 5, 0), None)},
                 loadout_index=0,
                 verified_talent_ids={220},
             )
+
+    def test_steam_library_discovery_supports_custom_drives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Steam"
+            custom = Path(directory) / "Games"
+            (root / "steamapps").mkdir(parents=True)
+            (root / "steamapps" / "libraryfolders.vdf").write_text(
+                f'"libraryfolders"\n{{\n"1"\n{{\n"path" "{str(custom).replace(chr(92), chr(92) * 2)}"\n}}\n}}',
+                encoding="utf-8",
+            )
+            self.assertIn(custom, editor.steam_library_roots([root]))
+
+    def test_translation_discovery_accepts_an_explicit_game_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            game_root = Path(directory) / "HeroSiege"
+            bin_root = game_root / "bin"
+            bin_root.mkdir(parents=True)
+            talent = bin_root / "translationsTalent.csv"
+            subtalent = bin_root / "translationsSubTalent.csv"
+            talent.write_text("talent_name_test|Test", encoding="utf-8")
+            subtalent.write_text("subTest01|Test", encoding="utf-8")
+            with patch.dict("os.environ", {"HERO_SIEGE_DIR": str(game_root)}):
+                self.assertEqual(editor.game_translation_file_pair(), (talent, subtalent))
 
     def test_apply_subtalent_allocations_rejects_unverified_skill(self):
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
