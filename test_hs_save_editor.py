@@ -27,6 +27,14 @@ class Season10ProgressTests(unittest.TestCase):
         self.assertEqual(editor.CLASS_ID_TO_NAME[18], "Jötunn")
         self.assertEqual(editor.CLASS_ID_TO_NAME[19], "Illusionist")
 
+    def test_s10_talent_id_map_covers_all_classes_without_duplicates(self):
+        self.assertEqual(set(editor.S10_CLASS_TALENT_KEYS), set(range(1, 25)))
+        self.assertEqual(sum(map(len, editor.S10_CLASS_TALENT_KEYS.values())), 432)
+        for class_id, keys in editor.S10_CLASS_TALENT_KEYS.items():
+            with self.subTest(class_id=class_id):
+                self.assertEqual(len(keys), 18)
+                self.assertEqual(len({key.casefold() for key in keys}), 18)
+
     def test_character_and_shop_fields_still_write_expected_sections(self):
         character = SAMPLE_SAVE
         shop = editor.default_shop_ini_text()
@@ -361,10 +369,7 @@ class Season10ProgressTests(unittest.TestCase):
             )
 
     def test_translation_resolver_aligns_active_skills_inside_eighteen_talent_block(self):
-        keys = [f"passive{index}" for index in range(18)]
-        keys[0] = "TectonicBoulder"
-        keys[4] = "Tornado"
-        keys[17] = "ChaosTotem"
+        keys = editor.S10_CLASS_TALENT_KEYS[13]
         talent_text = "\n".join(f"talent_name_{key}|{key}" for key in keys)
         subtalent_text = "\n".join(
             [
@@ -379,11 +384,60 @@ class Season10ProgressTests(unittest.TestCase):
             (0, 4, 17),
         )
 
+    def test_marksman_group_maps_rocket_turret_and_gunner_drone_to_correct_ids(self):
+        marksman_keys = editor.S10_CLASS_TALENT_KEYS[3]
+        talent_text = "\n".join(f"talent_name_{key}|{key}" for key in marksman_keys)
+        subtalent_text = "\n".join(
+            [
+                "subMarksmanTrickshot01|Trickshot A",
+                "subMarksmanArrowTurret01|Arrow Turret A",
+                "subMarksmanFragGrenade01|Frag A",
+                "subMarksmanRocketTurret01|Rocket A",
+                "subMarksmanRocketTurret14|Rocket Major",
+                "subMarksmanGunnerDrones01|Drone A",
+                "subMarksmanGunnerDrones14|Drone Major",
+            ]
+        )
+
+        definitions = editor.subtalent_tree_definitions_from_translations(
+            "Marksman",
+            3,
+            talent_text,
+            subtalent_text,
+        )
+
+        self.assertEqual(
+            [(definition.talent_id, definition.skill_name) for definition in definitions],
+            [
+                (38, "trickShot"),
+                (47, "arrowTurret"),
+                (48, "fragGrenade"),
+                (53, "rocketTurret"),
+                (55, "gunnerDrone"),
+            ],
+        )
+        self.assertEqual(definitions[-1].node_names[0], "Drone A")
+
+    def test_historical_subtalent_parent_names_map_to_current_skill_keys(self):
+        aliases = {
+            ("Viking", "Throw"): "monsterthrow",
+            ("Pirate", "FreezingChainShot"): "freezechainshot",
+            ("Redneck", "ChainSlash"): "chainsawslash",
+            ("Necromancer", "RaiseSkeleton"): "raiseskeletonwarrior",
+            ("Necromancer", "VengefulSpirit"): "summonvengefulspirit",
+            ("Jotunn", "SweepFreeze"): "frostsunder",
+            ("Prophet", "SpiritOfVendigo"): "spiritofwendigo",
+            ("Prophet", "StormHawk"): "spiritofhawk",
+        }
+        for (class_prefix, parent_key), expected in aliases.items():
+            with self.subTest(class_prefix=class_prefix, parent_key=parent_key):
+                self.assertEqual(
+                    editor.canonical_subtalent_parent(class_prefix, parent_key),
+                    expected,
+                )
+
     def test_resolver_creates_ids_only_for_allocated_active_shaman_talents(self):
-        keys = [f"passive{index}" for index in range(18)]
-        keys[0] = "TectonicBoulder"
-        keys[4] = "Tornado"
-        keys[17] = "ChaosTotem"
+        keys = editor.S10_CLASS_TALENT_KEYS[13]
         talent_text = "\n".join(f"talent_name_{key}|{key}" for key in keys)
         subtalent_text = "\n".join(
             [

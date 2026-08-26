@@ -42,7 +42,7 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.2.6"
+APP_VERSION = "1.2.7"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
@@ -358,6 +358,51 @@ CLASS_ID_TO_TRANSLATION_PREFIX = {
     22: "Stormweaver",
     23: "Bard",
     24: "Prophet",
+}
+
+# Season 10 reserves talent IDs 0 and 1, then stores exactly 18 IDs per class.
+# This order was verified against the game's EXE xrefs and its 432 talent icon
+# records. Translation CSV rows are not an ID table: several classes contain
+# legacy rows or use a different display order, so their row positions must
+# never be used as save IDs.
+S10_CLASS_TALENT_KEYS: dict[int, tuple[str, ...]] = {
+    1: ("weaponMaster", "charge", "stoneskin", "devastatingCharge", "norseResistance", "defensiveShout", "odinsFury", "battleAgility", "combatOrders", "seismicSlam", "bruteForce", "zeal", "monsterThrow", "ymirsChampion", "shockwave", "whirlwind", "berserk", "demolishingWinds"),
+    2: ("blazingTrail", "fireEnchant", "phoenixFlight", "infernoSlash", "ignite", "fireShield", "searingChains", "fieryPresence", "avatarOfFire", "fireBall", "breathOfFire", "meteor", "scorchingAura", "hydra", "comet", "fireNova", "volcano", "armageddon"),
+    3: ("trickShot", "vault", "multishot", "arrowRain", "homingMissile", "criticalAccuracy", "arrowRampage", "agility", "volatileShot", "arrowTurret", "fragGrenade", "beacon", "cannonTurret", "turretMastery", "landMine", "rocketTurret", "masterMechanic", "gunnerDrone"),
+    4: ("buckshot", "grenado", "explosiveBarrel", "cannonball", "explosiveBullet", "powderTrail", "kneeCap", "bombBarrage", "rapidFire", "freezeChainShot", "torrent", "frozenLead", "parrot", "setSail", "anchorSwing", "remiges", "treasureHunter", "landAhoy"),
+    5: ("sandCarver", "cloudOfSand", "sandGush", "sandEntombment", "oasisAura", "sandTremors", "mysticSand", "dissipatingTornado", "sandVortex", "bladeStrike", "scimitarCharge", "eyeOfRa", "sunRay", "flyingScimitar", "rupture", "chainSlice", "phantomBlade", "hemorrhage"),
+    6: ("oilSpill", "pipeBombs", "moonshineMolotov", "tireFire", "combustibleOil", "hillbillyRage", "spontaneousCombustion", "moonshineMadness", "pickupRaid", "durableWear", "chainsawSlash", "loggersEndurance", "chainsawMassacre", "chainsawMastery", "experiencedLogger", "revvedUp", "rogueChainsaw", "treeTrunkTriumph"),
+    7: ("boneShred", "meatShield", "meatBomb", "poisonBreath", "boneSpear", "cursedGround", "boneSpirit", "corpseExplosion", "poisonNova", "amplifyDamage", "raiseSkeletonWarrior", "raiseSkeletonMage", "skeletonMastery", "lifeTap", "summonFrenzy", "summonDamnedLegion", "summonResistances", "summonVengefulSpirit"),
+    8: ("quickSlash", "battleGlance", "shurikenThrow", "explosiveKunai", "evasion", "smokeBomb", "warriorsSpirit", "bushido", "liveByTheSword", "bladeBarrier", "explodingBolas", "fanOfKnives", "forHonor", "omnislash", "burstOfSpeed", "shadowStep", "wayOfTheWarrior", "empiresSlash"),
+    9: ("vengeance", "thunderShield", "divineStorm", "fanaticismAura", "holyShockAura", "lightningFury", "ballLightning", "eyeOfTheStorm", "thorsFury", "holyBolt", "divineWisdom", "lightsEmbrace", "holyRetribution", "holyNova", "holyHammer", "holyAura", "fistOfTheHeavens", "theVeneratedOne"),
+    10: ("noxiousStrike", "causticSpearhead", "leapingAmbush", "deathFromAbove", "toxicRemains", "masterPoisoner", "jungleCamouflage", "thrillOfTheHunt", "envenom", "astropesGift", "feint", "rebound", "spearnage", "stormDash", "thunderGoddessesChosen", "chooserOfTheSlain", "thunderFury", "astropesBattleMaiden"),
+    11: ("triggerFinger", "eagleEye", "execute", "bulletHell", "shredderTrap", "possessedBullet", "demonsPresence", "concentrationAura", "absoluteMayhem", "fastSlices", "demonsCalling", "heartAttack", "shadowAnomalies", "soulLeech", "swordHandler", "demonsShield", "sliceOfShadows", "demonForm"),
+    12: ("boneFragments", "impale", "ossification", "boneStorm", "singleOut", "cartilageBuildUp", "ominousPresence", "spinalTap", "boneBarrage", "bloodBolts", "manaPoolAura", "gutSpread", "manaShield", "manaDevour", "demonicPresence", "bloodSurge", "bloodDemons", "bloodTendrils"),
+    13: ("tectonicBoulder", "twisters", "rockFragments", "earthBind", "tornado", "earthsGrace", "meteorStorm", "naturesProphet", "fissures", "earthTotem", "spiritualGuide", "spiritWolves", "scentOfTheWolf", "stormTotem", "fireTotem", "fractalMind", "astralIntellect", "chaosTotem"),
+    14: ("satansMark", "restlessSpirits", "digestSouls", "shadowBolt", "soulSpurn", "martyr", "darkOath", "malediction", "blackMass", "heavenlyFire", "burstOfLight", "flashHeal", "benediction", "divineHealing", "chainOfHolyLight", "holyShield", "healingZone", "manaOrb"),
+    15: ("heavyBall", "bouncingGrenade", "unstableBomb", "theBigBoom", "wreckingBall", "crazyGrapple", "flailMastery", "bombardment", "forceOverwhelming", "serratedChains", "retiariusNet", "chainTrap", "titaniumChains", "masterTrapMaker", "rendFlesh", "madnessControl", "resilientGladiator", "annihilation"),
+    16: ("surgicalBloodLetting", "malpractice", "crowMasksPresence", "bloodSustenance", "miasma", "boosterShot", "lifeBloodAura", "devoutDoctor", "defunctSurgeon", "plagueOfRats", "toxicFlask", "crematus", "oops", "chantOfWeakness", "explodingMice", "jarOfLeeches", "plagueMaster", "randyTheRancidRat"),
+    17: ("gloriousStrike", "commendingBanner", "battleCharge", "lanceThrust", "parry", "armorCrush", "crushingLance", "lanceThrow", "glory", "shieldSlam", "taunt", "counter", "knightsResilience", "damageReflect", "honedDefenses", "shieldWall", "knightsVigor", "lastStand"),
+    18: ("frozenBoulder", "breathOfIce", "powerOfTheAncients", "orbOfFrost", "frozenHide", "icicles", "portalOfIce", "avatarOfFrost", "blizzard", "glacialTremors", "flashFreeze", "freezingLeap", "permaFrost", "glacialArmor", "frostSunder", "avalanche", "absoluteZero", "theEmbodimentOfAurgelmir"),
+    19: ("sandGuardian", "piercingSand", "callForWar", "linkOfSand", "dissipation", "spiritLink", "cheapShot", "circleOfGuardians", "combatOrder", "ageProliferation", "gravitationalSlam", "splitReality", "sandsOfTime", "timeDeceleration", "dimensionalDisplacement", "precognition", "expansiveMind", "temporalHeroes"),
+    20: ("scorchingWhip", "whiplash", "solarFlare", "shineBright", "solarDash", "blindingLight", "solarForm", "solarBurst", "supernova", "collision", "darkSideofTheMoon", "tsunami", "asteroid", "lunarForm", "lunarOrbit", "bloodMoon", "moonlight", "blackHole"),
+    21: ("slicingThrow", "furiousStrike", "holyForm", "unholyForm", "sacrilegiousScorn", "endingFate", "spiritualDuality", "awakeningFury", "insatiableHunger", "chainRip", "brutalizingSlash", "fuelToFire", "hungerForBlood", "butchersHook", "chainSwing", "submergedKnives", "enragedMania", "blender"),
+    22: ("chargedBolts", "manaFiend", "pulsingCharge", "lightningSurge", "gateway", "chainLightning", "staticShock", "stormCloud", "symphonyOfThunder", "electricCells", "stormBolt", "highVoltageAura", "loadedPulse", "waveLength", "theBatteryWithin", "hyperCharged", "apocalypticThunder", "afterShock"),
+    23: ("slayingRiffs", "insaneRiff", "visceralGrowl", "ampingUp", "sacrilegiousSymphony", "satansMelody", "soundsOfSilence", "highDb", "progeniesOfTheGreatCataclysm", "headBanger", "crowdPummeler", "crowdDiver", "adrenalineMomentum", "cravingForAttention", "pyroTechnician", "cravingForAnotherKilling", "antiSocialPitFighter", "moshpitMassacre"),
+    24: ("carrionWorm", "thornedRoots", "raven", "blessedNature", "summonEnt", "thornedBranch", "spiritOfForest", "deepRooted", "entColossus", "spiritOfWendigo", "woundingPaw", "skinWalker", "leapingCharge", "spiritOfEnt", "maelstromOfFrost", "swampsEssence", "manaDwelling", "spiritOfHawk"),
+}
+
+# The current translationsSubTalent.csv retains these historical parent names.
+# Values are canonicalized keys from the EXE-confirmed talent table above.
+S10_SUBTALENT_PARENT_ALIASES: dict[tuple[str, str], str] = {
+    ("viking", "throw"): "monsterthrow",
+    ("pirate", "freezingchainshot"): "freezechainshot",
+    ("redneck", "chainslash"): "chainsawslash",
+    ("necromancer", "raiseskeleton"): "raiseskeletonwarrior",
+    ("necromancer", "vengefulspirit"): "summonvengefulspirit",
+    ("jotunn", "sweepfreeze"): "frostsunder",
+    ("prophet", "spiritofvendigo"): "spiritofwendigo",
+    ("prophet", "stormhawk"): "spiritofhawk",
 }
 
 
@@ -850,12 +895,64 @@ def game_translation_file_pair() -> tuple[Path, Path] | None:
     return None
 
 
+def canonical_skill_key(value: str) -> str:
+    """Normalize harmless translation-key differences such as Drone/Drones."""
+    key = re.sub(r"[^a-z0-9]", "", value.casefold())
+    return key[:-1] if key.endswith("s") else key
+
+
+def canonical_subtalent_parent(class_prefix: str, value: str) -> str:
+    key = canonical_skill_key(value)
+    return S10_SUBTALENT_PARENT_ALIASES.get((class_prefix.casefold(), key), key)
+
+
+def talent_names_from_translations(talent_text: str) -> dict[str, str]:
+    """Return localized talent names keyed by their stable translation key."""
+    names: dict[str, str] = {}
+    for line in talent_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split("|")
+        key = parts[0].strip() if parts else ""
+        if not key.startswith("talent_name_"):
+            continue
+        skill_key = key.removeprefix("talent_name_")
+        skill_name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else skill_key
+        names.setdefault(skill_key.casefold(), skill_name)
+    return names
+
+
+def class_id_from_translation_prefix(class_prefix: str) -> int:
+    for class_id, prefix in CLASS_ID_TO_TRANSLATION_PREFIX.items():
+        if prefix.casefold() == class_prefix.casefold():
+            return class_id
+    raise ValueError(f"Unsupported class translation prefix: {class_prefix}.")
+
+
+def verified_class_talent_keys(class_id: int, talent_text: str) -> tuple[str, ...]:
+    """Return the EXE-confirmed talent order after checking the live translation table."""
+    keys = S10_CLASS_TALENT_KEYS.get(class_id)
+    if keys is None or len(keys) != 18 or len(set(map(str.casefold, keys))) != 18:
+        raise ValueError(f"The verified Season 10 talent map is invalid for class ID {class_id}.")
+    translated = talent_names_from_translations(talent_text)
+    missing = [key for key in keys if key.casefold() not in translated]
+    if missing:
+        class_name = CLASS_ID_TO_NAME.get(class_id, str(class_id))
+        raise ValueError(
+            f"The current game's {class_name} talent table is newer than this editor "
+            f"(missing verified keys: {', '.join(missing)})."
+        )
+    return keys
+
+
 def active_subtalent_offsets_from_translations(
     class_prefix: str,
     talent_text: str,
     subtalent_text: str,
+    allocated_offsets: set[int] | None = None,
 ) -> tuple[int, ...]:
-    """Resolve active-skill positions inside a class's native 18-talent block."""
+    """Resolve active-skill positions using the EXE-confirmed 18-talent order."""
     parent_pattern = re.compile(
         rf"^sub{re.escape(class_prefix)}(.+?)(\d{{1,2}})\|",
         re.IGNORECASE,
@@ -867,33 +964,16 @@ def active_subtalent_offsets_from_translations(
             continue
         local_id = int(match.group(2))
         if 1 <= local_id <= 14:
-            parents.add(match.group(1).casefold())
+            parents.add(canonical_subtalent_parent(class_prefix, match.group(1)))
     if not parents:
         raise ValueError(f"No subskill definitions were found for {class_prefix}.")
 
-    talent_keys: list[str] = []
-    for line in talent_text.splitlines():
-        key = line.split("|", 1)[0].strip()
-        if key.startswith("talent_name_"):
-            talent_keys.append(key.removeprefix("talent_name_"))
-    if len(talent_keys) < 18:
-        raise ValueError("The talent translation table is incomplete.")
-
-    best_start = -1
-    best_score = -1
-    for start in range(len(talent_keys) - 17):
-        score = sum(key.casefold() in parents for key in talent_keys[start : start + 18])
-        if score > best_score:
-            best_start = start
-            best_score = score
-    minimum_score = min(3, len(parents))
-    if best_start < 0 or best_score < minimum_score:
-        raise ValueError(f"Could not align the {class_prefix} subskill definitions to its talent block.")
-
+    class_id = class_id_from_translation_prefix(class_prefix)
+    talent_keys = verified_class_talent_keys(class_id, talent_text)
     offsets = tuple(
         offset
-        for offset, key in enumerate(talent_keys[best_start : best_start + 18])
-        if key.casefold() in parents
+        for offset, key in enumerate(talent_keys)
+        if canonical_skill_key(key) in parents
     )
     if not offsets:
         raise ValueError(f"No active {class_prefix} talent offsets were resolved.")
@@ -905,6 +985,7 @@ def subtalent_tree_definitions_from_translations(
     class_id: int,
     talent_text: str,
     subtalent_text: str,
+    allocated_offsets: set[int] | None = None,
 ) -> tuple[SubtalentTreeDefinition, ...]:
     """Resolve localized node names for every active skill in one class block."""
     parent_pattern = re.compile(
@@ -922,43 +1003,26 @@ def subtalent_tree_definitions_from_translations(
             continue
         parts = stripped.split("|")
         english_name = parts[1].strip() if len(parts) > 1 else ""
-        node_names.setdefault(match.group(1).casefold(), {})[node_id] = english_name
+        parent_key = canonical_subtalent_parent(class_prefix, match.group(1))
+        node_names.setdefault(parent_key, {})[node_id] = english_name
     if not node_names:
         raise ValueError(f"No subskill definitions were found for {class_prefix}.")
 
-    talent_rows: list[tuple[str, str]] = []
-    for line in talent_text.splitlines():
-        parts = line.strip().split("|")
-        key = parts[0].strip() if parts else ""
-        if not key.startswith("talent_name_"):
-            continue
-        skill_key = key.removeprefix("talent_name_")
-        skill_name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else skill_key
-        talent_rows.append((skill_key, skill_name))
-    if len(talent_rows) < 18:
-        raise ValueError("The talent translation table is incomplete.")
-
-    best_start = -1
-    best_score = -1
-    for start in range(len(talent_rows) - 17):
-        score = sum(key.casefold() in node_names for key, _ in talent_rows[start : start + 18])
-        if score > best_score:
-            best_start = start
-            best_score = score
-    minimum_score = min(3, len(node_names))
-    if best_start < 0 or best_score < minimum_score:
-        raise ValueError(f"Could not align the {class_prefix} subskill definitions to its talent block.")
+    if class_id_from_translation_prefix(class_prefix) != class_id:
+        raise ValueError(f"Class ID {class_id} does not match {class_prefix}.")
+    talent_keys = verified_class_talent_keys(class_id, talent_text)
+    talent_names = talent_names_from_translations(talent_text)
 
     class_block_start = 2 + (class_id - 1) * 18
     definitions: list[SubtalentTreeDefinition] = []
-    for offset, (skill_key, skill_name) in enumerate(talent_rows[best_start : best_start + 18]):
-        names = node_names.get(skill_key.casefold())
+    for offset, skill_key in enumerate(talent_keys):
+        names = node_names.get(canonical_skill_key(skill_key))
         if names is None:
             continue
         definitions.append(
             SubtalentTreeDefinition(
                 talent_id=class_block_start + offset,
-                skill_name=skill_name,
+                skill_name=talent_names[skill_key.casefold()],
                 node_names=tuple(names.get(node_id) or f"Node s{node_id}" for node_id in range(1, 15)),
             )
         )
@@ -982,13 +1046,13 @@ def resolve_allocated_subtalent_definitions(
     pair = game_translation_file_pair() if translation_pair is None else translation_pair
     if pair is None:
         raise ValueError("The current game's talent translation files could not be located.")
+    allocated = allocated_talent_ids(text, loadout_index)
     definitions = subtalent_tree_definitions_from_translations(
         class_prefix,
         class_id,
         _read_translation_text(pair[0]),
         _read_translation_text(pair[1]),
     )
-    allocated = allocated_talent_ids(text, loadout_index)
     return tuple(definition for definition in definitions if definition.talent_id in allocated)
 
 
@@ -1011,6 +1075,8 @@ def resolve_allocated_subtalent_ids(
     if pair is None:
         raise ValueError("The current game's talent translation files could not be located.")
     talent_path, subtalent_path = pair
+    class_block_start = 2 + (class_id - 1) * 18
+    allocated = allocated_talent_ids(text, loadout_index)
     offsets = active_subtalent_offsets_from_translations(
         class_prefix,
         _read_translation_text(talent_path),
@@ -1018,11 +1084,10 @@ def resolve_allocated_subtalent_ids(
     )
 
     # Season 10 reserves talent IDs 0 and 1, then stores exactly 18 IDs per
-    # class in class-ID order. Verified against native Shaman (218) and Bard
-    # (398) saves; translation files determine which positions are active.
-    class_block_start = 2 + (class_id - 1) * 18
+    # class in class-ID order. The position map comes from the native EXE xref
+    # table; translation files only determine localized names and active trees.
     active_ids = {class_block_start + offset for offset in offsets}
-    return active_ids & allocated_talent_ids(text, loadout_index)
+    return active_ids & allocated
 
 
 def max_small_subtalent_nodes(
