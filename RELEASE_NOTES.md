@@ -1,28 +1,17 @@
-# Hero Siege Save Editor v1.2.6
-
-## New
-
-- Added safe per-skill subskill editing: distribute up to 50 points across small upgrades and select one major upgrade.
-- Added conversion of existing offline characters to Odyssey without changing their level, items, talents, or quest progress.
-- Added native Season 10 charm-slot and Ether Point tools.
-
-## Improved
-
-- Simplified the main interface, button names, save messages, confirmations, and subskill explanations.
-- Removed internal talent and node IDs from the normal subskill interface.
-- Kept automatic timestamped backups while making save results easier to understand.
-- Reads current game talent translations to resolve skills instead of relying on one fixed class layout.
+# Hero Siege Save Editor v1.2.8
 
 ## Fixes
 
-- Waypoint unlocking no longer unlocks difficulties.
-- Difficulty unlocking no longer changes waypoint progress.
-- Corrected the Jötunn and Illusionist class mapping.
-- Major subskill upgrades are written directly at their required rank while unselected major upgrades remain disabled.
+- Replaced the incorrect universal 50-point subskill limit with the game's exact per-node limits.
+- Verified all 222 active Season 10 subskill trees and their 2,220 small-upgrade nodes against the current game build.
+- Supports node limits from rank 1 through rank 8; each tree's total is calculated from its own ten nodes.
+- Gunner Drone now correctly accepts its two rank-8 upgrades and 56-point total.
+- The Max Small Upgrades action now uses each node's real limit and never changes major upgrades.
+- Unknown future talent IDs are blocked instead of being written with guessed limits.
 
 ## Verification
 
-- All 31 automated save-transformation tests pass.
-- The standalone Windows executable was rebuilt from the v1.2.6 source.
+- All 42 automated tests pass.
+- Rebuilt and smoke-tested the standalone Windows executable.
 
 Offline/single-player saves only. Close the game before editing and keep the automatic backup.

@@ -62,12 +62,115 @@ LEGACY_CHARM_SLOT_SAVE_KEY = "charmSlot"
 S10_TARGET_TOTAL_ETHER_POINTS = 800
 S10_TALENT_LOADOUT_COUNT = 8
 # Every current S10 sub-skill tree has fourteen local nodes. The first ten are
-# the ordinary 5-rank nodes; s11-s14 are the mutually exclusive major nodes
-# and must never be changed by the small-node forge action.
+# ordinary nodes with tree-specific rank caps; s11-s14 are mutually exclusive
+# major nodes and must never be changed by the small-node forge action.
 S10_SMALL_SUBTALENT_NODE_IDS = tuple(range(1, 11))
 S10_MAJOR_SUBTALENT_NODE_IDS = tuple(range(11, 15))
-S10_SMALL_SUBTALENT_BALANCED_RANK = 5.0
-S10_SUBTALENT_POINT_BUDGET = 50
+S10_DEFAULT_SMALL_SUBTALENT_CAPS = (5,) * 10
+# Extracted from the current game's GetSubTalentInfo(talent_id, node_id, 2)
+# routine. Unknown/future tree IDs are rejected rather than assigned guessed
+# limits. Entries omitted from the override table are verified 5/5 nodes.
+S10_VERIFIED_SUBTALENT_IDS = frozenset({
+    3, 8, 11, 13, 14, 15, 16, 17, 18, 20, 22, 23, 29, 30, 32, 33, 34, 35,
+    36, 37, 38, 39, 40, 41, 44, 46, 47, 48, 50, 52, 53, 55, 56, 58, 59, 60,
+    61, 63, 65, 66, 68, 70, 73, 74, 75, 76, 79, 82, 83, 84, 85, 87, 89, 90,
+    93, 94, 95, 100, 102, 104, 108, 109, 110, 112, 113, 114, 116, 117, 118,
+    120, 121, 125, 127, 128, 129, 130, 131, 133, 137, 138, 141, 143, 145,
+    146, 148, 150, 151, 152, 155, 159, 160, 162, 164, 165, 166, 167, 172,
+    173, 175, 176, 177, 180, 182, 185, 186, 187, 190, 191, 192, 198, 200,
+    201, 203, 207, 208, 209, 215, 218, 219, 220, 221, 222, 224, 226, 227,
+    229, 231, 232, 235, 236, 237, 239, 240, 242, 244, 245, 246, 250, 253,
+    254, 255, 257, 259, 261, 263, 264, 265, 269, 271, 272, 276, 281, 282,
+    283, 287, 288, 289, 290, 292, 293, 296, 299, 301, 304, 305, 308, 309,
+    311, 314, 316, 318, 319, 322, 323, 326, 333, 335, 336, 343, 344, 346,
+    348, 352, 355, 356, 358, 361, 362, 363, 371, 372, 375, 376, 377, 379,
+    380, 383, 386, 387, 390, 396, 398, 400, 402, 406, 407, 409, 412, 415,
+    416, 417, 418, 420, 421, 422, 424, 425, 426, 428, 429, 430, 433,
+})
+S10_SMALL_SUBTALENT_CAP_OVERRIDES = {
+    14: (5, 3, 5, 5, 6, 8, 3, 5, 5, 4),
+    16: (3, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    17: (5, 5, 6, 5, 2, 5, 5, 5, 6, 3),
+    22: (5, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    30: (3, 3, 5, 5, 5, 8, 5, 5, 5, 5),
+    35: (5, 8, 5, 5, 5, 5, 5, 5, 5, 2),
+    37: (8, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    38: (5, 5, 5, 5, 3, 5, 5, 5, 5, 5),
+    40: (5, 5, 5, 5, 3, 5, 5, 5, 5, 5),
+    41: (5, 5, 2, 5, 5, 5, 5, 5, 5, 5),
+    44: (5, 5, 5, 5, 3, 5, 5, 5, 5, 5),
+    48: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    50: (5, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    52: (5, 5, 2, 5, 5, 5, 2, 5, 5, 5),
+    53: (5, 5, 5, 5, 5, 5, 5, 5, 8, 5),
+    55: (8, 8, 5, 5, 5, 5, 5, 5, 5, 5),
+    58: (5, 5, 5, 5, 5, 5, 3, 5, 5, 5),
+    68: (5, 5, 4, 5, 5, 5, 5, 5, 5, 5),
+    74: (4, 5, 5, 5, 4, 5, 6, 5, 5, 5),
+    76: (5, 3, 5, 5, 3, 5, 4, 5, 2, 5),
+    87: (5, 5, 5, 5, 5, 2, 5, 5, 5, 2),
+    89: (3, 3, 5, 5, 5, 5, 5, 5, 5, 5),
+    93: (2, 3, 5, 5, 5, 5, 5, 5, 5, 5),
+    95: (3, 3, 5, 5, 2, 5, 5, 5, 5, 5),
+    108: (5, 5, 4, 5, 5, 5, 3, 5, 5, 5),
+    110: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    112: (5, 5, 5, 3, 5, 5, 5, 5, 5, 5),
+    113: (5, 5, 5, 3, 5, 5, 5, 5, 5, 2),
+    120: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    125: (5, 5, 5, 5, 5, 3, 5, 5, 5, 5),
+    128: (5, 5, 3, 5, 5, 5, 5, 5, 5, 5),
+    129: (3, 3, 3, 5, 5, 5, 5, 5, 5, 5),
+    137: (5, 5, 5, 5, 4, 5, 5, 5, 5, 5),
+    143: (5, 5, 5, 5, 5, 5, 3, 5, 5, 5),
+    146: (3, 3, 5, 5, 5, 5, 5, 5, 5, 5),
+    150: (5, 5, 5, 5, 5, 5, 5, 5, 5, 2),
+    152: (5, 5, 5, 5, 5, 5, 3, 3, 5, 5),
+    172: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    173: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    176: (5, 5, 5, 5, 3, 3, 5, 5, 5, 3),
+    177: (8, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    180: (5, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    182: (5, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    185: (5, 8, 5, 5, 5, 5, 5, 5, 3, 5),
+    187: (3, 8, 5, 5, 5, 5, 5, 5, 5, 2),
+    198: (5, 5, 3, 5, 5, 5, 3, 5, 5, 5),
+    200: (2, 5, 5, 5, 5, 5, 5, 7, 5, 5),
+    201: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    207: (5, 5, 5, 3, 5, 5, 6, 3, 8, 5),
+    208: (5, 3, 5, 5, 5, 5, 5, 5, 5, 5),
+    209: (3, 5, 5, 5, 5, 5, 5, 3, 5, 5),
+    215: (5, 5, 5, 5, 5, 8, 5, 5, 5, 2),
+    219: (5, 5, 5, 5, 5, 5, 5, 5, 5, 3),
+    229: (3, 3, 5, 5, 5, 3, 5, 5, 5, 5),
+    232: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    236: (5, 5, 5, 5, 3, 5, 5, 5, 5, 5),
+    237: (5, 5, 5, 5, 2, 5, 5, 5, 5, 2),
+    240: (3, 3, 5, 5, 3, 5, 5, 5, 5, 5),
+    250: (3, 3, 3, 5, 5, 5, 3, 5, 3, 5),
+    254: (5, 5, 5, 5, 4, 5, 5, 5, 5, 5),
+    259: (5, 5, 5, 5, 5, 3, 5, 5, 5, 5),
+    261: (4, 5, 5, 4, 5, 5, 5, 3, 5, 2),
+    281: (3, 3, 5, 5, 5, 5, 5, 5, 5, 5),
+    283: (3, 3, 5, 5, 5, 5, 3, 5, 5, 5),
+    290: (2, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    299: (5, 2, 5, 5, 5, 5, 5, 5, 5, 5),
+    318: (5, 5, 2, 5, 8, 5, 2, 3, 3, 5),
+    346: (4, 5, 5, 5, 5, 4, 5, 5, 5, 5),
+    358: (5, 5, 4, 4, 5, 5, 5, 8, 5, 5),
+    362: (5, 5, 5, 5, 5, 3, 5, 5, 5, 5),
+    363: (5, 5, 5, 5, 5, 3, 5, 5, 5, 5),
+    379: (5, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    380: (3, 3, 3, 5, 5, 5, 5, 5, 5, 5),
+    383: (7, 5, 5, 5, 5, 5, 3, 5, 5, 5),
+    387: (3, 3, 5, 5, 5, 5, 3, 5, 5, 2),
+    396: (3, 3, 5, 5, 5, 5, 5, 5, 5, 5),
+    402: (5, 5, 5, 5, 2, 5, 5, 5, 5, 5),
+    412: (5, 5, 5, 5, 5, 5, 3, 5, 5, 5),
+    420: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    428: (5, 5, 5, 5, 5, 5, 5, 5, 3, 1),
+    430: (4, 5, 5, 5, 5, 5, 5, 3, 5, 5),
+    433: (5, 5, 5, 5, 5, 3, 5, 5, 5, 1),
+}
 # S10 awards Ether through 25 quests. A completed quest advances its chain by
 # two save stages; the values below are the native final progress for each
 # chain. Difficulty is metadata for newly-created questlog slots.
@@ -285,6 +388,7 @@ class SubtalentTreeDefinition:
     talent_id: int
     skill_name: str
     node_names: tuple[str, ...]
+    small_node_caps: tuple[int, ...]
 
 
 CHARACTER_FIELDS = [
@@ -983,6 +1087,23 @@ def canonical_subtalent_parent(class_prefix: str, value: str) -> str:
     return S10_SUBTALENT_PARENT_ALIASES.get((class_prefix.casefold(), key), key)
 
 
+def small_subtalent_node_caps(talent_id: int) -> tuple[int, ...]:
+    """Return the game-verified s1-s10 rank caps for one active talent."""
+    if talent_id not in S10_VERIFIED_SUBTALENT_IDS:
+        raise ValueError(
+            f"Talent t{talent_id} has no verified Season 10 subskill rank limits."
+        )
+    caps = S10_SMALL_SUBTALENT_CAP_OVERRIDES.get(
+        talent_id,
+        S10_DEFAULT_SMALL_SUBTALENT_CAPS,
+    )
+    if len(caps) != len(S10_SMALL_SUBTALENT_NODE_IDS) or any(
+        not isinstance(cap, int) or cap <= 0 for cap in caps
+    ):
+        raise ValueError(f"Talent t{talent_id} has an invalid verified subskill limit table.")
+    return caps
+
+
 def talent_names_from_translations(talent_text: str) -> dict[str, str]:
     """Return localized talent names keyed by their stable translation key."""
     names: dict[str, str] = {}
@@ -1101,6 +1222,7 @@ def subtalent_tree_definitions_from_translations(
                 talent_id=class_block_start + offset,
                 skill_name=talent_names[skill_key.casefold()],
                 node_names=tuple(names.get(node_id) or f"Node s{node_id}" for node_id in range(1, 15)),
+                small_node_caps=small_subtalent_node_caps(class_block_start + offset),
             )
         )
     return tuple(definitions)
@@ -1172,7 +1294,7 @@ def max_small_subtalent_nodes(
     loadout_index: int | None = None,
     create_talent_ids: set[int] | None = None,
 ) -> tuple[str, int, int]:
-    """Distribute 50 points as rank 5 in s1-s10 and preserve s11-s14.
+    """Max s1-s10 to each tree's game-verified caps and preserve s11-s14.
 
     Missing trees are created only for caller-provided, verified active talent
     IDs. Passive talents never receive fabricated sub-skill data.
@@ -1184,8 +1306,12 @@ def max_small_subtalent_nodes(
             raise ValueError(f"Invalid active talent ID: {talent_id}.")
         trees.setdefault(f"t{talent_id}", {})
     changed_nodes = 0
-    for nodes in trees.values():
-        for node_id in S10_SMALL_SUBTALENT_NODE_IDS:
+    for tree_key, nodes in trees.items():
+        if not re.fullmatch(r"t\d+", tree_key):
+            raise ValueError(f"Invalid subskill tree key: {tree_key!r}.")
+        talent_id = int(tree_key[1:])
+        caps = small_subtalent_node_caps(talent_id)
+        for node_id, cap in zip(S10_SMALL_SUBTALENT_NODE_IDS, caps):
             key = f"s{node_id}"
             current = nodes.get(key)
             if current is not None:
@@ -1193,9 +1319,9 @@ def max_small_subtalent_nodes(
                     current_rank = float(current)
                 except (TypeError, ValueError, OverflowError) as exc:
                     raise ValueError(f"Invalid small sub-skill rank {key}={current!r}.") from exc
-                if current_rank == S10_SMALL_SUBTALENT_BALANCED_RANK:
+                if current_rank == cap:
                     continue
-            nodes[key] = S10_SMALL_SUBTALENT_BALANCED_RANK
+            nodes[key] = float(cap)
             changed_nodes += 1
 
     if not trees:
@@ -1211,7 +1337,7 @@ def apply_subtalent_allocations(
     loadout_index: int | None = None,
     verified_talent_ids: set[int] | None = None,
 ) -> tuple[str, int, int]:
-    """Write up to 50 distributed small-node points and one optional 3/3 major."""
+    """Write game-valid small-node ranks and one optional 3/3 major."""
     index = active_talent_loadout_index(text) if loadout_index is None else loadout_index
     trees = decode_subtalent_map(text, index)
     changed_nodes = 0
@@ -1221,13 +1347,19 @@ def apply_subtalent_allocations(
         if len(small_ranks) != len(S10_SMALL_SUBTALENT_NODE_IDS):
             raise ValueError(f"Talent t{talent_id} must provide exactly ten small-node ranks.")
         nodes = trees.get(f"t{talent_id}", {})
-        if any(
-            not isinstance(rank, int) or not 0 <= rank <= S10_SUBTALENT_POINT_BUDGET
-            for rank in small_ranks
-        ):
-            raise ValueError(f"Talent t{talent_id} has an invalid small-node rank.")
-        if sum(small_ranks) > S10_SUBTALENT_POINT_BUDGET:
-            raise ValueError(f"Talent t{talent_id} exceeds the 50-point small-node budget.")
+        caps = small_subtalent_node_caps(talent_id)
+        for node_id, rank, cap in zip(S10_SMALL_SUBTALENT_NODE_IDS, small_ranks, caps):
+            if not isinstance(rank, int) or rank < 0:
+                raise ValueError(f"Talent t{talent_id} node s{node_id} has an invalid rank.")
+            if rank > cap:
+                try:
+                    saved_rank = float(nodes.get(f"s{node_id}", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    saved_rank = -1
+                if saved_rank != rank:
+                    raise ValueError(
+                        f"Talent t{talent_id} node s{node_id} allows at most {cap} points."
+                    )
         if major_node_id is not None and major_node_id not in S10_MAJOR_SUBTALENT_NODE_IDS:
             raise ValueError(f"Talent t{talent_id} has an invalid major node s{major_node_id}.")
 
@@ -2924,8 +3056,8 @@ class HssEditorApp:
         Label(
             wrapper,
             text=(
-                "Choose a skill, spend up to 50 points on its small upgrades, then choose one "
-                "major upgrade. Click Apply Changes when you are done."
+                "Choose a skill and distribute points within each upgrade's game limit, then "
+                "choose one major upgrade. Click Apply Changes when you are done."
             ),
             anchor="w",
             justify="left",
@@ -2972,7 +3104,7 @@ class HssEditorApp:
             rank_combo = ttk.Combobox(
                 node_frame,
                 textvariable=rank_vars[index],
-                values=tuple(str(rank) for rank in range(S10_SUBTALENT_POINT_BUDGET + 1)),
+                values=tuple(str(rank) for rank in range(6)),
                 width=4,
                 state="readonly",
                 style="Modern.TCombobox",
@@ -2982,7 +3114,7 @@ class HssEditorApp:
         node_frame.columnconfigure(0, weight=1)
         node_frame.columnconfigure(3, weight=1)
 
-        total_var = StringVar(value="Points used: 0 / 50")
+        total_var = StringVar(value="Points used: 0")
         Label(
             node_frame,
             textvariable=total_var,
@@ -3017,7 +3149,8 @@ class HssEditorApp:
                 total = sum(int(variable.get()) for variable in rank_vars)
             except ValueError:
                 total = 0
-            total_var.set(f"Points used: {total} / 50")
+            definition = definition_by_label[current_label[0]]
+            total_var.set(f"Points used: {total} / {sum(definition.small_node_caps)}")
 
         def store_current(show_error: bool = True) -> bool:
             definition = definition_by_label[current_label[0]]
@@ -3027,15 +3160,24 @@ class HssEditorApp:
                 if show_error:
                     messagebox.showerror(APP_TITLE, "Choose one of the listed values for every upgrade.", parent=window)
                 return False
-            if any(rank < 0 for rank in ranks):
-                if show_error:
-                    messagebox.showerror(APP_TITLE, "Upgrade points cannot be negative.", parent=window)
-                return False
-            total = sum(ranks)
-            if total > S10_SUBTALENT_POINT_BUDGET:
-                if show_error:
-                    messagebox.showerror(APP_TITLE, f"{definition.skill_name} uses {total} points. The maximum is 50.", parent=window)
-                return False
+            saved_nodes = trees.get(f"t{definition.talent_id}", {})
+            for node_id, rank, cap in zip(
+                S10_SMALL_SUBTALENT_NODE_IDS,
+                ranks,
+                definition.small_node_caps,
+            ):
+                try:
+                    saved_rank = int(float(saved_nodes.get(f"s{node_id}", 0) or 0))
+                except (TypeError, ValueError, OverflowError):
+                    saved_rank = -1
+                if rank < 0 or (rank > cap and rank != saved_rank):
+                    if show_error:
+                        messagebox.showerror(
+                            APP_TITLE,
+                            f"{definition.node_names[node_id - 1]} allows 0-{cap} points.",
+                            parent=window,
+                        )
+                    return False
             major_node_id = major_choice_ids.get(major_var.get())
             working[definition.talent_id] = (ranks, major_node_id)
             return True
@@ -3043,10 +3185,12 @@ class HssEditorApp:
         def load_current() -> None:
             definition = definition_by_label[current_label[0]]
             ranks, major_node_id = working[definition.talent_id]
-            for index, (label, variable, combo, rank) in enumerate(zip(node_labels, rank_vars, rank_combos, ranks)):
+            for index, (label, variable, combo, rank, cap) in enumerate(
+                zip(node_labels, rank_vars, rank_combos, ranks, definition.small_node_caps)
+            ):
                 label.configure(text=definition.node_names[index])
-                values = [str(value) for value in range(S10_SUBTALENT_POINT_BUDGET + 1)]
-                if rank > S10_SUBTALENT_POINT_BUDGET:
+                values = [str(value) for value in range(cap + 1)]
+                if rank > cap:
                     values.append(str(rank))
                 combo.configure(values=tuple(values))
                 variable.set(str(rank))
@@ -3076,9 +3220,15 @@ class HssEditorApp:
             current_label[0] = new_label
             load_current()
 
-        def set_small_ranks(rank: int) -> None:
+        def max_current_small_ranks() -> None:
+            definition = definition_by_label[current_label[0]]
+            for variable, cap in zip(rank_vars, definition.small_node_caps):
+                variable.set(str(cap))
+            refresh_total()
+
+        def clear_small_ranks() -> None:
             for variable in rank_vars:
-                variable.set(str(rank))
+                variable.set("0")
             refresh_total()
 
         def stage_allocations() -> None:
@@ -3121,8 +3271,8 @@ class HssEditorApp:
         quick_actions.pack(fill=X, pady=(12, 6))
         self.make_button(
             quick_actions,
-            "Fill 5 Each (50 Points)",
-            lambda: set_small_ranks(5),
+            "Max Small Upgrades",
+            max_current_small_ranks,
             bg=UI_CARD,
             active_bg=UI_BORDER,
             fg=UI_TEXT,
@@ -3130,7 +3280,7 @@ class HssEditorApp:
         self.make_button(
             quick_actions,
             "Clear Small Upgrades",
-            lambda: set_small_ranks(0),
+            clear_small_ranks,
             bg=UI_CARD,
             active_bg=UI_BORDER,
             fg=UI_TEXT,

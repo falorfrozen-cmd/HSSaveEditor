@@ -216,8 +216,31 @@ class Season10ProgressTests(unittest.TestCase):
             key = f"s{node_id}"
             self.assertEqual(decoded["t220"].get(key), original["t220"].get(key))
 
+    def test_max_small_subtalents_uses_gunner_drone_node_caps(self):
+        original = {"t55": {"s11": 3.0}}
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        save += (
+            "\n[talent_loadout_0]\n"
+            f'subtalents="{editor.encode_base64_json(original)}"\n'
+        )
+
+        result, tree_count, changed_nodes = editor.max_small_subtalent_nodes(save)
+        nodes = editor.decode_subtalent_map(result, 0)["t55"]
+
+        self.assertEqual((tree_count, changed_nodes), (1, 10))
+        self.assertEqual(tuple(int(nodes[f"s{i}"]) for i in range(1, 11)), (8, 8, 5, 5, 5, 5, 5, 5, 5, 5))
+        self.assertEqual(nodes["s11"], 3.0)
+
+    def test_every_verified_subtalent_tree_has_ten_positive_node_caps(self):
+        self.assertEqual(len(editor.S10_VERIFIED_SUBTALENT_IDS), 222)
+        for talent_id in editor.S10_VERIFIED_SUBTALENT_IDS:
+            with self.subTest(talent_id=talent_id):
+                caps = editor.small_subtalent_node_caps(talent_id)
+                self.assertEqual(len(caps), 10)
+                self.assertTrue(all(isinstance(cap, int) and cap > 0 for cap in caps))
+
     def test_max_small_subtalents_normalizes_to_five_each_and_preserves_other_loadouts(self):
-        active = {"t10": {"s2": 7.0, "s13": 3.0}}
+        active = {"t220": {"s2": 7.0, "s13": 3.0}}
         inactive = {"t99": {"s1": 1.0, "s11": 3.0}}
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
         save = editor.set_ini_value(
@@ -231,7 +254,7 @@ class Season10ProgressTests(unittest.TestCase):
 
         self.assertEqual(tree_count, 1)
         self.assertEqual(changed_nodes, 10)
-        active_result = editor.decode_subtalent_map(result, 0)["t10"]
+        active_result = editor.decode_subtalent_map(result, 0)["t220"]
         self.assertTrue(all(active_result[f"s{node_id}"] == 5.0 for node_id in range(1, 11)))
         self.assertEqual(active_result["s13"], 3.0)
         self.assertEqual(editor.decode_subtalent_map(result, 1), inactive)
@@ -325,7 +348,7 @@ class Season10ProgressTests(unittest.TestCase):
         self.assertEqual(decoded["t221"], other_tree)
 
     def test_apply_subtalent_allocations_allows_distributing_more_than_five_to_a_node(self):
-        original = {"t220": {"s1": 7.0, "s2": 2.0, "s13": 3.0}}
+        original = {"t55": {"s1": 7.0, "s2": 2.0, "s13": 3.0}}
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
         save += (
             "\n[talent_loadout_0]\n"
@@ -334,18 +357,18 @@ class Season10ProgressTests(unittest.TestCase):
 
         result, _, _ = editor.apply_subtalent_allocations(
             save,
-            {220: ((7, 5, 0, 0, 0, 0, 0, 0, 0, 0), 13)},
+            {55: ((7, 5, 0, 0, 0, 0, 0, 0, 0, 0), 13)},
             loadout_index=0,
-            verified_talent_ids={220},
+            verified_talent_ids={55},
         )
         decoded = editor.decode_subtalent_map(result, 0)
 
-        self.assertEqual(decoded["t220"]["s1"], 7.0)
-        self.assertEqual(decoded["t220"]["s2"], 5.0)
-        self.assertEqual(decoded["t220"]["s13"], 3.0)
+        self.assertEqual(decoded["t55"]["s1"], 7.0)
+        self.assertEqual(decoded["t55"]["s2"], 5.0)
+        self.assertEqual(decoded["t55"]["s13"], 3.0)
 
     def test_apply_subtalent_allocations_allows_rapidfire_style_rank_eight(self):
-        original = {"t220": {"s1": 5.0}}
+        original = {"t55": {"s1": 5.0}}
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
         save += (
             "\n[talent_loadout_0]\n"
@@ -354,20 +377,32 @@ class Season10ProgressTests(unittest.TestCase):
 
         result, _, _ = editor.apply_subtalent_allocations(
             save,
-            {220: ((0, 8, 5, 5, 5, 5, 5, 5, 5, 2), None)},
+            {55: ((0, 8, 5, 5, 5, 5, 5, 5, 5, 2), None)},
             loadout_index=0,
-            verified_talent_ids={220},
+            verified_talent_ids={55},
         )
-        self.assertEqual(editor.decode_subtalent_map(result, 0)["t220"]["s2"], 8.0)
+        self.assertEqual(editor.decode_subtalent_map(result, 0)["t55"]["s2"], 8.0)
 
-    def test_apply_subtalent_allocations_rejects_more_than_fifty_total_points(self):
+    def test_apply_subtalent_allocations_accepts_gunner_drone_full_fifty_six_points(self):
         save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
-        with self.assertRaisesRegex(ValueError, "exceeds the 50-point"):
+        ranks = (8, 8, 5, 5, 5, 5, 5, 5, 5, 5)
+        result, _, _ = editor.apply_subtalent_allocations(
+            save,
+            {55: (ranks, None)},
+            loadout_index=0,
+            verified_talent_ids={55},
+        )
+        decoded = editor.decode_subtalent_map(result, 0)["t55"]
+        self.assertEqual(sum(int(decoded[f"s{node_id}"]) for node_id in range(1, 11)), 56)
+
+    def test_apply_subtalent_allocations_rejects_rank_above_node_cap(self):
+        save = editor.set_ini_value(SAMPLE_SAVE, "0", "talent_loadout", "0", "number")
+        with self.assertRaisesRegex(ValueError, "node s3 allows at most 5"):
             editor.apply_subtalent_allocations(
                 save,
-                {220: ((8, 8, 5, 5, 5, 5, 5, 5, 5, 0), None)},
+                {55: ((8, 8, 6, 5, 5, 5, 5, 5, 5, 5), None)},
                 loadout_index=0,
-                verified_talent_ids={220},
+                verified_talent_ids={55},
             )
 
     def test_steam_library_discovery_supports_custom_drives(self):
@@ -452,6 +487,7 @@ class Season10ProgressTests(unittest.TestCase):
             ],
         )
         self.assertEqual(definitions[-1].node_names[0], "Drone A")
+        self.assertEqual(definitions[-1].small_node_caps, (8, 8, 5, 5, 5, 5, 5, 5, 5, 5))
 
     def test_historical_subtalent_parent_names_map_to_current_skill_keys(self):
         aliases = {
