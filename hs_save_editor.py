@@ -42,7 +42,7 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.9"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
@@ -80,8 +80,8 @@ S10_VERIFIED_SUBTALENT_IDS = frozenset({
     201, 203, 207, 208, 209, 215, 218, 219, 220, 221, 222, 224, 226, 227,
     229, 231, 232, 235, 236, 237, 239, 240, 242, 244, 245, 246, 250, 253,
     254, 255, 257, 259, 261, 263, 264, 265, 269, 271, 272, 276, 281, 282,
-    283, 287, 288, 289, 290, 292, 293, 296, 299, 301, 304, 305, 308, 309,
-    311, 314, 316, 318, 319, 322, 323, 326, 333, 335, 336, 343, 344, 346,
+    283, 287, 288, 289, 290, 292, 293, 296, 299, 301, 304, 305, 308, 315,
+    317, 318, 325, 326, 327, 329, 332, 334, 336, 337, 340, 341, 344, 346,
     348, 352, 355, 356, 358, 361, 362, 363, 371, 372, 375, 376, 377, 379,
     380, 383, 386, 387, 390, 396, 398, 400, 402, 406, 407, 409, 412, 415,
     416, 417, 418, 420, 421, 422, 424, 425, 426, 428, 429, 430, 433,
@@ -153,7 +153,7 @@ S10_SMALL_SUBTALENT_CAP_OVERRIDES = {
     283: (3, 3, 5, 5, 5, 5, 3, 5, 5, 5),
     290: (2, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     299: (5, 2, 5, 5, 5, 5, 5, 5, 5, 5),
-    318: (5, 5, 2, 5, 8, 5, 2, 3, 3, 5),
+    336: (5, 5, 2, 5, 8, 5, 2, 3, 3, 5),
     346: (4, 5, 5, 5, 5, 4, 5, 5, 5, 5),
     358: (5, 5, 4, 4, 5, 5, 5, 8, 5, 5),
     362: (5, 5, 5, 5, 5, 3, 5, 5, 5, 5),
@@ -465,10 +465,9 @@ CLASS_ID_TO_TRANSLATION_PREFIX = {
 }
 
 # Season 10 reserves talent IDs 0 and 1, then stores exactly 18 IDs per class.
-# This order was verified against the game's EXE xrefs and its 432 talent icon
-# records. Translation CSV rows are not an ID table: several classes contain
-# legacy rows or use a different display order, so their row positions must
-# never be used as save IDs.
+# Translation CSV rows are not an ID table: several classes contain legacy
+# rows or use a different display order, so their row positions must never be
+# used as save IDs.
 S10_CLASS_TALENT_KEYS: dict[int, tuple[str, ...]] = {
     1: ("weaponMaster", "charge", "stoneskin", "devastatingCharge", "norseResistance", "defensiveShout", "odinsFury", "battleAgility", "combatOrders", "seismicSlam", "bruteForce", "zeal", "monsterThrow", "ymirsChampion", "shockwave", "whirlwind", "berserk", "demolishingWinds"),
     2: ("blazingTrail", "fireEnchant", "phoenixFlight", "infernoSlash", "ignite", "fireShield", "searingChains", "fieryPresence", "avatarOfFire", "fireBall", "breathOfFire", "meteor", "scorchingAura", "hydra", "comet", "fireNova", "volcano", "armageddon"),
@@ -495,6 +494,15 @@ S10_CLASS_TALENT_KEYS: dict[int, tuple[str, ...]] = {
     23: ("slayingRiffs", "insaneRiff", "visceralGrowl", "ampingUp", "sacrilegiousSymphony", "satansMelody", "soundsOfSilence", "highDb", "progeniesOfTheGreatCataclysm", "headBanger", "crowdPummeler", "crowdDiver", "adrenalineMomentum", "cravingForAttention", "pyroTechnician", "cravingForAnotherKilling", "antiSocialPitFighter", "moshpitMassacre"),
     24: ("carrionWorm", "thornedRoots", "raven", "blessedNature", "summonEnt", "thornedBranch", "spiritOfForest", "deepRooted", "entColossus", "spiritOfWendigo", "woundingPaw", "skinWalker", "leapingCharge", "spiritOfEnt", "maelstromOfFrost", "swampsEssence", "manaDwelling", "spiritOfHawk"),
 }
+
+# Save talent blocks follow class order except for Jotunn and Illusionist,
+# whose adjacent 18-ID blocks are reversed. This is confirmed by native saves:
+# class 18 stores Jotunn talents at 326-343 and class 19 at 308-325.
+S10_CLASS_TALENT_BLOCK_STARTS: dict[int, int] = {
+    class_id: 2 + (class_id - 1) * 18 for class_id in range(1, 25)
+}
+S10_CLASS_TALENT_BLOCK_STARTS[18] = 326
+S10_CLASS_TALENT_BLOCK_STARTS[19] = 308
 
 # The current translationsSubTalent.csv retains these historical parent names.
 # Values are canonicalized keys from the EXE-confirmed talent table above.
@@ -1089,6 +1097,14 @@ def canonical_subtalent_parent(class_prefix: str, value: str) -> str:
     return S10_SUBTALENT_PARENT_ALIASES.get((class_prefix.casefold(), key), key)
 
 
+def class_talent_block_start(class_id: int) -> int:
+    """Return the first native save talent ID for a Season 10 class."""
+    try:
+        return S10_CLASS_TALENT_BLOCK_STARTS[class_id]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported character class ID: {class_id}.") from exc
+
+
 def small_subtalent_node_caps(talent_id: int) -> tuple[int, ...]:
     """Return the game-verified s1-s10 rank caps for one active talent."""
     if talent_id not in S10_VERIFIED_SUBTALENT_IDS:
@@ -1213,7 +1229,7 @@ def subtalent_tree_definitions_from_translations(
     talent_keys = verified_class_talent_keys(class_id, talent_text)
     talent_names = talent_names_from_translations(talent_text)
 
-    class_block_start = 2 + (class_id - 1) * 18
+    class_block_start = class_talent_block_start(class_id)
     definitions: list[SubtalentTreeDefinition] = []
     for offset, skill_key in enumerate(talent_keys):
         names = node_names.get(canonical_skill_key(skill_key))
@@ -1276,7 +1292,7 @@ def resolve_allocated_subtalent_ids(
     if pair is None:
         raise ValueError("The current game's talent translation files could not be located.")
     talent_path, subtalent_path = pair
-    class_block_start = 2 + (class_id - 1) * 18
+    class_block_start = class_talent_block_start(class_id)
     allocated = allocated_talent_ids(text, loadout_index)
     offsets = active_subtalent_offsets_from_translations(
         class_prefix,
@@ -1284,9 +1300,8 @@ def resolve_allocated_subtalent_ids(
         _read_translation_text(subtalent_path),
     )
 
-    # Season 10 reserves talent IDs 0 and 1, then stores exactly 18 IDs per
-    # class in class-ID order. The position map comes from the native EXE xref
-    # table; translation files only determine localized names and active trees.
+    # Translation files determine localized names and which entries in the
+    # class's native 18-ID save block own sub-skill trees.
     active_ids = {class_block_start + offset for offset in offsets}
     return active_ids & allocated
 

@@ -36,6 +36,16 @@ class Season10ProgressTests(unittest.TestCase):
                 self.assertEqual(len(keys), 18)
                 self.assertEqual(len({key.casefold() for key in keys}), 18)
 
+    def test_native_talent_blocks_swap_jotunn_and_illusionist(self):
+        self.assertEqual(editor.class_talent_block_start(18), 326)
+        self.assertEqual(editor.class_talent_block_start(19), 308)
+        native_ids = {
+            editor.class_talent_block_start(class_id) + offset
+            for class_id in range(1, 25)
+            for offset in range(18)
+        }
+        self.assertEqual(native_ids, set(range(2, 434)))
+
     def test_character_and_shop_fields_still_write_expected_sections(self):
         character = SAMPLE_SAVE
         shop = editor.default_shop_ini_text()
@@ -501,6 +511,39 @@ class Season10ProgressTests(unittest.TestCase):
         )
         self.assertEqual(definitions[-1].node_names[0], "Drone A")
         self.assertEqual(definitions[-1].small_node_caps, (8, 8, 5, 5, 5, 5, 5, 5, 5, 5))
+
+    def test_jotunn_native_save_resolves_breath_and_portal_subskills(self):
+        jotunn_keys = editor.S10_CLASS_TALENT_KEYS[18]
+        talent_text = "\n".join(f"talent_name_{key}|{key}" for key in jotunn_keys)
+        subtalent_text = "\n".join(
+            [
+                "subJotunnBreathOfIce01|Cold Breath",
+                "subJotunnBreathOfIce14|Breath Major",
+                "subJotunnPortalOfIce01|Frozen Portal",
+                "subJotunnPortalOfIce14|Portal Major",
+            ]
+        )
+        save = SAMPLE_SAVE.replace('class="1.000000"', 'class="18.000000"')
+        save += (
+            "\n[talent_loadout_0]\n"
+            'talent_327="1.000000"\n'
+            'talent_332="1.000000"\n'
+            'subtalents="e30="\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            talent_path = Path(directory) / "translationsTalent.csv"
+            subtalent_path = Path(directory) / "translationsSubTalent.csv"
+            talent_path.write_text(talent_text, encoding="utf-8")
+            subtalent_path.write_text(subtalent_text, encoding="utf-8")
+            pair = (talent_path, subtalent_path)
+            resolved_ids = editor.resolve_allocated_subtalent_ids(save, 0, pair)
+            definitions = editor.resolve_allocated_subtalent_definitions(save, 0, pair)
+
+        self.assertEqual(resolved_ids, {327, 332})
+        self.assertEqual(
+            [(definition.talent_id, definition.skill_name) for definition in definitions],
+            [(327, "breathOfIce"), (332, "portalOfIce")],
+        )
 
     def test_historical_subtalent_parent_names_map_to_current_skill_keys(self):
         aliases = {

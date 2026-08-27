@@ -1,18 +1,15 @@
-# Hero Siege Save Editor v1.2.8
+# Hero Siege Save Editor v1.2.9
 
 ## Fixes
 
-- Replaced the incorrect universal 50-point subskill limit with the game's exact per-node limits.
-- Verified all 222 active Season 10 subskill trees and their 2,220 small-upgrade nodes against the current game build.
-- Supports node limits from rank 1 through rank 8; each tree's total is calculated from its own ten nodes.
-- Gunner Drone now correctly accepts its two rank-8 upgrades and 56-point total.
-- The Max Small Upgrades action now uses each node's real limit and never changes major upgrades.
-- Unknown future talent IDs are blocked instead of being written with guessed limits.
-- Fixed Ether Tree sidecars containing the current game's node IDs up to 577 being rejected by the editor's obsolete 215 limit; future non-negative node IDs are preserved without a fixed ceiling.
+- Fixed Jotunn characters incorrectly reporting that they had no active skills to edit.
+- Corrected the native Season 10 talent-block order: Jotunn uses IDs 326-343 and Illusionist uses IDs 308-325.
+- Corrected the verified active-tree IDs and per-node limits for both classes.
+- Confirmed the fix against the supplied Jotunn save containing Breath of Ice (t327) and Portal of Ice (t332).
 
 ## Verification
 
-- All 44 automated tests pass.
+- All 46 automated tests pass.
 - Rebuilt and smoke-tested the standalone Windows executable.
 
 Offline/single-player saves only. Close the game before editing and keep the automatic backup.
