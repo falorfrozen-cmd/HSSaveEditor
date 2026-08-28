@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import shutil
@@ -42,7 +43,7 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.2.9"
+APP_VERSION = "1.3.0"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
@@ -68,17 +69,19 @@ S10_MAJOR_SUBTALENT_NODE_IDS = tuple(range(11, 15))
 S10_DEFAULT_SMALL_SUBTALENT_CAPS = (5,) * 10
 # Extracted from the current game's GetSubTalentInfo(talent_id, node_id, 2)
 # routine. Unknown/future tree IDs are rejected rather than assigned guessed
-# limits. Entries omitted from the override table are verified 5/5 nodes.
+# limits. The retained t72 Treasure Hunter case is intentionally excluded
+# because the current game ships no sub-skill translations/UI for that orphan
+# tree. Entries omitted from the override table are verified 5/5 nodes.
 S10_VERIFIED_SUBTALENT_IDS = frozenset({
-    3, 8, 11, 13, 14, 15, 16, 17, 18, 20, 22, 23, 29, 30, 32, 33, 34, 35,
+    7, 10, 11, 12, 13, 14, 16, 17, 18, 20, 22, 23, 29, 30, 32, 33, 34, 35,
     36, 37, 38, 39, 40, 41, 44, 46, 47, 48, 50, 52, 53, 55, 56, 58, 59, 60,
-    61, 63, 65, 66, 68, 70, 73, 74, 75, 76, 79, 82, 83, 84, 85, 87, 89, 90,
-    93, 94, 95, 100, 102, 104, 108, 109, 110, 112, 113, 114, 116, 117, 118,
-    120, 121, 125, 127, 128, 129, 130, 131, 133, 137, 138, 141, 143, 145,
-    146, 148, 150, 151, 152, 155, 159, 160, 162, 164, 165, 166, 167, 172,
+    61, 63, 65, 66, 68, 71, 73, 74, 75, 76, 79, 82, 83, 84, 85, 87, 89,
+    90, 92, 93, 95, 100, 101, 103, 108, 109, 110, 112, 113, 114, 116, 117, 118,
+    120, 122, 125, 127, 128, 129, 131, 132, 135, 137, 139, 140, 143, 145,
+    146, 148, 149, 150, 152, 155, 158, 161, 162, 164, 165, 166, 167, 172,
     173, 175, 176, 177, 180, 182, 185, 186, 187, 190, 191, 192, 198, 200,
-    201, 203, 207, 208, 209, 215, 218, 219, 220, 221, 222, 224, 226, 227,
-    229, 231, 232, 235, 236, 237, 239, 240, 242, 244, 245, 246, 250, 253,
+    201, 204, 207, 208, 209, 215, 218, 219, 220, 221, 222, 224, 226, 227,
+    229, 230, 232, 235, 236, 237, 239, 240, 242, 244, 245, 246, 250, 253,
     254, 255, 257, 259, 261, 263, 264, 265, 269, 271, 272, 276, 281, 282,
     283, 287, 288, 289, 290, 292, 293, 296, 299, 301, 304, 305, 308, 315,
     317, 318, 325, 326, 327, 329, 332, 334, 336, 337, 340, 341, 344, 346,
@@ -87,6 +90,7 @@ S10_VERIFIED_SUBTALENT_IDS = frozenset({
     416, 417, 418, 420, 421, 422, 424, 425, 426, 428, 429, 430, 433,
 })
 S10_SMALL_SUBTALENT_CAP_OVERRIDES = {
+    7: (5, 5, 5, 5, 5, 5, 5, 2, 5, 5),
     14: (5, 3, 5, 5, 6, 8, 3, 5, 5, 4),
     16: (3, 5, 5, 5, 2, 5, 5, 5, 5, 5),
     17: (5, 5, 6, 5, 2, 5, 5, 5, 6, 3),
@@ -109,6 +113,7 @@ S10_SMALL_SUBTALENT_CAP_OVERRIDES = {
     76: (5, 3, 5, 5, 3, 5, 4, 5, 2, 5),
     87: (5, 5, 5, 5, 5, 2, 5, 5, 5, 2),
     89: (3, 3, 5, 5, 5, 5, 5, 5, 5, 5),
+    92: (3, 3, 5, 5, 5, 5, 5, 5, 5, 5),
     93: (2, 3, 5, 5, 5, 5, 5, 5, 5, 5),
     95: (3, 3, 5, 5, 2, 5, 5, 5, 5, 5),
     108: (5, 5, 4, 5, 5, 5, 3, 5, 5, 5),
@@ -116,14 +121,19 @@ S10_SMALL_SUBTALENT_CAP_OVERRIDES = {
     112: (5, 5, 5, 3, 5, 5, 5, 5, 5, 5),
     113: (5, 5, 5, 3, 5, 5, 5, 5, 5, 2),
     120: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    122: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     125: (5, 5, 5, 5, 5, 3, 5, 5, 5, 5),
     128: (5, 5, 3, 5, 5, 5, 5, 5, 5, 5),
     129: (3, 3, 3, 5, 5, 5, 5, 5, 5, 5),
+    132: (5, 7, 5, 3, 5, 5, 5, 5, 5, 5),
+    135: (5, 5, 5, 3, 2, 5, 5, 5, 5, 5),
     137: (5, 5, 5, 5, 4, 5, 5, 5, 5, 5),
+    140: (3, 3, 5, 5, 4, 5, 5, 5, 5, 5),
     143: (5, 5, 5, 5, 5, 5, 3, 5, 5, 5),
     146: (3, 3, 5, 5, 5, 5, 5, 5, 5, 5),
     150: (5, 5, 5, 5, 5, 5, 5, 5, 5, 2),
     152: (5, 5, 5, 5, 5, 5, 3, 3, 5, 5),
+    161: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     172: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     173: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     176: (5, 5, 5, 5, 3, 3, 5, 5, 5, 3),
@@ -135,12 +145,14 @@ S10_SMALL_SUBTALENT_CAP_OVERRIDES = {
     198: (5, 5, 3, 5, 5, 5, 3, 5, 5, 5),
     200: (2, 5, 5, 5, 5, 5, 5, 7, 5, 5),
     201: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
+    204: (4, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     207: (5, 5, 5, 3, 5, 5, 6, 3, 8, 5),
     208: (5, 3, 5, 5, 5, 5, 5, 5, 5, 5),
     209: (3, 5, 5, 5, 5, 5, 5, 3, 5, 5),
     215: (5, 5, 5, 5, 5, 8, 5, 5, 5, 2),
     219: (5, 5, 5, 5, 5, 5, 5, 5, 5, 3),
     229: (3, 3, 5, 5, 5, 3, 5, 5, 5, 5),
+    230: (5, 3, 5, 5, 5, 5, 5, 5, 5, 5),
     232: (3, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     236: (5, 5, 5, 5, 3, 5, 5, 5, 5, 5),
     237: (5, 5, 5, 5, 2, 5, 5, 5, 5, 2),
@@ -153,7 +165,9 @@ S10_SMALL_SUBTALENT_CAP_OVERRIDES = {
     283: (3, 3, 5, 5, 5, 5, 3, 5, 5, 5),
     290: (2, 5, 5, 5, 5, 5, 5, 5, 5, 5),
     299: (5, 2, 5, 5, 5, 5, 5, 5, 5, 5),
-    336: (5, 5, 2, 5, 8, 5, 2, 3, 3, 5),
+    317: (3, 3, 3, 5, 5, 5, 2, 5, 5, 3),
+    318: (5, 5, 2, 5, 8, 5, 2, 3, 3, 5),
+    340: (5, 3, 5, 5, 5, 5, 5, 3, 5, 5),
     346: (4, 5, 5, 5, 5, 4, 5, 5, 5, 5),
     358: (5, 5, 4, 4, 5, 5, 5, 8, 5, 5),
     362: (5, 5, 5, 5, 5, 3, 5, 5, 5, 5),
@@ -465,23 +479,23 @@ CLASS_ID_TO_TRANSLATION_PREFIX = {
 }
 
 # Season 10 reserves talent IDs 0 and 1, then stores exactly 18 IDs per class.
-# Translation CSV rows are not an ID table: several classes contain legacy
-# rows or use a different display order, so their row positions must never be
-# used as save IDs.
+# These tuples are in ascending native save-ID order. They were reconstructed
+# from every current PopulateTalentStructMap<Class> vector; translation CSV row
+# order is not an ID table and must never be used as one.
 S10_CLASS_TALENT_KEYS: dict[int, tuple[str, ...]] = {
-    1: ("weaponMaster", "charge", "stoneskin", "devastatingCharge", "norseResistance", "defensiveShout", "odinsFury", "battleAgility", "combatOrders", "seismicSlam", "bruteForce", "zeal", "monsterThrow", "ymirsChampion", "shockwave", "whirlwind", "berserk", "demolishingWinds"),
+    1: ("weaponMaster", "stoneskin", "bruteForce", "norseResistance", "defensiveShout", "odinsFury", "battleAgility", "combatOrders", "seismicSlam", "charge", "zeal", "monsterThrow", "ymirsChampion", "devastatingCharge", "shockwave", "whirlwind", "berserk", "demolishingWinds"),
     2: ("blazingTrail", "fireEnchant", "phoenixFlight", "infernoSlash", "ignite", "fireShield", "searingChains", "fieryPresence", "avatarOfFire", "fireBall", "breathOfFire", "meteor", "scorchingAura", "hydra", "comet", "fireNova", "volcano", "armageddon"),
     3: ("trickShot", "vault", "multishot", "arrowRain", "homingMissile", "criticalAccuracy", "arrowRampage", "agility", "volatileShot", "arrowTurret", "fragGrenade", "beacon", "cannonTurret", "turretMastery", "landMine", "rocketTurret", "masterMechanic", "gunnerDrone"),
-    4: ("buckshot", "grenado", "explosiveBarrel", "cannonball", "explosiveBullet", "powderTrail", "kneeCap", "bombBarrage", "rapidFire", "freezeChainShot", "torrent", "frozenLead", "parrot", "setSail", "anchorSwing", "remiges", "treasureHunter", "landAhoy"),
+    4: ("buckshot", "grenado", "explosiveBarrel", "cannonball", "explosiveBullet", "powderTrail", "kneeCap", "bombBarrage", "rapidFire", "torrent", "freezeChainShot", "frozenLead", "parrot", "setSail", "remiges", "anchorSwing", "treasureHunter", "landAhoy"),
     5: ("sandCarver", "cloudOfSand", "sandGush", "sandEntombment", "oasisAura", "sandTremors", "mysticSand", "dissipatingTornado", "sandVortex", "bladeStrike", "scimitarCharge", "eyeOfRa", "sunRay", "flyingScimitar", "rupture", "chainSlice", "phantomBlade", "hemorrhage"),
-    6: ("oilSpill", "pipeBombs", "moonshineMolotov", "tireFire", "combustibleOil", "hillbillyRage", "spontaneousCombustion", "moonshineMadness", "pickupRaid", "durableWear", "chainsawSlash", "loggersEndurance", "chainsawMassacre", "chainsawMastery", "experiencedLogger", "revvedUp", "rogueChainsaw", "treeTrunkTriumph"),
-    7: ("boneShred", "meatShield", "meatBomb", "poisonBreath", "boneSpear", "cursedGround", "boneSpirit", "corpseExplosion", "poisonNova", "amplifyDamage", "raiseSkeletonWarrior", "raiseSkeletonMage", "skeletonMastery", "lifeTap", "summonFrenzy", "summonDamnedLegion", "summonResistances", "summonVengefulSpirit"),
-    8: ("quickSlash", "battleGlance", "shurikenThrow", "explosiveKunai", "evasion", "smokeBomb", "warriorsSpirit", "bushido", "liveByTheSword", "bladeBarrier", "explodingBolas", "fanOfKnives", "forHonor", "omnislash", "burstOfSpeed", "shadowStep", "wayOfTheWarrior", "empiresSlash"),
-    9: ("vengeance", "thunderShield", "divineStorm", "fanaticismAura", "holyShockAura", "lightningFury", "ballLightning", "eyeOfTheStorm", "thorsFury", "holyBolt", "divineWisdom", "lightsEmbrace", "holyRetribution", "holyNova", "holyHammer", "holyAura", "fistOfTheHeavens", "theVeneratedOne"),
+    6: ("moonshineMolotov", "pipeBombs", "oilSpill", "tireFire", "spontaneousCombustion", "hillbillyRage", "moonshineMadness", "combustibleOil", "pickupRaid", "chainsawSlash", "durableWear", "chainsawMassacre", "chainsawMastery", "revvedUp", "experiencedLogger", "loggersEndurance", "rogueChainsaw", "treeTrunkTriumph"),
+    7: ("boneShred", "meatShield", "meatBomb", "poisonBreath", "boneSpear", "cursedGround", "boneSpirit", "corpseExplosion", "poisonNova", "amplifyDamage", "raiseSkeletonWarrior", "skeletonMastery", "raiseSkeletonMage", "lifeTap", "summonFrenzy", "summonDamnedLegion", "summonResistances", "summonVengefulSpirit"),
+    8: ("quickSlash", "battleGlance", "evasion", "smokeBomb", "shurikenThrow", "warriorsSpirit", "bushido", "explosiveKunai", "liveByTheSword", "bladeBarrier", "fanOfKnives", "omnislash", "explodingBolas", "wayOfTheWarrior", "forHonor", "shadowStep", "burstOfSpeed", "empiresSlash"),
+    9: ("vengeance", "thunderShield", "lightningFury", "holyShockAura", "divineStorm", "fanaticismAura", "ballLightning", "eyeOfTheStorm", "thorsFury", "holyBolt", "divineWisdom", "holyAura", "holyHammer", "holyRetribution", "lightsEmbrace", "fistOfTheHeavens", "holyNova", "theVeneratedOne"),
     10: ("noxiousStrike", "causticSpearhead", "leapingAmbush", "deathFromAbove", "toxicRemains", "masterPoisoner", "jungleCamouflage", "thrillOfTheHunt", "envenom", "astropesGift", "feint", "rebound", "spearnage", "stormDash", "thunderGoddessesChosen", "chooserOfTheSlain", "thunderFury", "astropesBattleMaiden"),
     11: ("triggerFinger", "eagleEye", "execute", "bulletHell", "shredderTrap", "possessedBullet", "demonsPresence", "concentrationAura", "absoluteMayhem", "fastSlices", "demonsCalling", "heartAttack", "shadowAnomalies", "soulLeech", "swordHandler", "demonsShield", "sliceOfShadows", "demonForm"),
-    12: ("boneFragments", "impale", "ossification", "boneStorm", "singleOut", "cartilageBuildUp", "ominousPresence", "spinalTap", "boneBarrage", "bloodBolts", "manaPoolAura", "gutSpread", "manaShield", "manaDevour", "demonicPresence", "bloodSurge", "bloodDemons", "bloodTendrils"),
-    13: ("tectonicBoulder", "twisters", "rockFragments", "earthBind", "tornado", "earthsGrace", "meteorStorm", "naturesProphet", "fissures", "earthTotem", "spiritualGuide", "spiritWolves", "scentOfTheWolf", "stormTotem", "fireTotem", "fractalMind", "astralIntellect", "chaosTotem"),
+    12: ("boneFragments", "impale", "ossification", "singleOut", "boneStorm", "cartilageBuildUp", "ominousPresence", "spinalTap", "boneBarrage", "bloodBolts", "gutSpread", "manaPoolAura", "manaShield", "manaDevour", "demonicPresence", "bloodSurge", "bloodDemons", "bloodTendrils"),
+    13: ("tectonicBoulder", "twisters", "rockFragments", "earthBind", "tornado", "earthsGrace", "meteorStorm", "naturesProphet", "fissures", "earthTotem", "spiritualGuide", "stormTotem", "spiritWolves", "scentOfTheWolf", "fireTotem", "fractalMind", "astralIntellect", "chaosTotem"),
     14: ("satansMark", "restlessSpirits", "digestSouls", "shadowBolt", "soulSpurn", "martyr", "darkOath", "malediction", "blackMass", "heavenlyFire", "burstOfLight", "flashHeal", "benediction", "divineHealing", "chainOfHolyLight", "holyShield", "healingZone", "manaOrb"),
     15: ("heavyBall", "bouncingGrenade", "unstableBomb", "theBigBoom", "wreckingBall", "crazyGrapple", "flailMastery", "bombardment", "forceOverwhelming", "serratedChains", "retiariusNet", "chainTrap", "titaniumChains", "masterTrapMaker", "rendFlesh", "madnessControl", "resilientGladiator", "annihilation"),
     16: ("surgicalBloodLetting", "malpractice", "crowMasksPresence", "bloodSustenance", "miasma", "boosterShot", "lifeBloodAura", "devoutDoctor", "defunctSurgeon", "plagueOfRats", "toxicFlask", "crematus", "oops", "chantOfWeakness", "explodingMice", "jarOfLeeches", "plagueMaster", "randyTheRancidRat"),
@@ -503,6 +517,42 @@ S10_CLASS_TALENT_BLOCK_STARTS: dict[int, int] = {
 }
 S10_CLASS_TALENT_BLOCK_STARTS[18] = 326
 S10_CLASS_TALENT_BLOCK_STARTS[19] = 308
+
+# Earlier editor releases could write a handful of passive/unsupported talent
+# IDs as sub-skill tree keys. Only those impossible native tree IDs are moved;
+# valid IDs are never permuted because they may contain game-created data.
+S10_LEGACY_SUBTALENT_TREE_ID_MIGRATIONS: dict[int, dict[int, int]] = {
+    1: {3: 11, 8: 7, 9: 7, 15: 14, 19: 18},
+    2: {31: 30},
+    3: {42: 44, 43: 41, 49: 47, 54: 50},
+    4: {57: 56, 69: 71, 70: 71},
+    5: {77: 76, 80: 79, 86: 85, 88: 87, 91: 90},
+    6: {94: 92, 102: 101, 104: 103},
+    7: {115: 113, 119: 118, 121: 122, 124: 122},
+    8: {130: 132, 133: 131, 141: 139},
+    9: {147: 146, 153: 152, 156: 155, 160: 158, 163: 162},
+    10: {168: 167, 174: 173, 178: 177, 181: 180},
+    11: {183: 182, 188: 187, 193: 192, 199: 198},
+    12: {203: 204, 205: 200, 206: 201, 212: 207, 213: 208, 217: 215},
+    13: {231: 229},
+    17: {294: 292, 295: 293, 298: 296, 303: 301, 306: 304, 307: 305},
+    18: {
+        308: 326,
+        309: 327,
+        310: 326,
+        313: 329,
+        314: 332,
+        319: 337,
+        320: 336,
+        321: 337,
+        322: 340,
+        323: 341,
+        325: 341,
+    },
+    19: {326: 308, 328: 315, 333: 315, 335: 317, 336: 318, 343: 325},
+    22: {381: 380, 384: 383, 388: 387, 391: 390, 397: 396},
+    24: {419: 416, 423: 420, 427: 424, 431: 428, 432: 429},
+}
 
 # The current translationsSubTalent.csv retains these historical parent names.
 # Values are canonicalized keys from the EXE-confirmed talent table above.
@@ -1105,6 +1155,29 @@ def class_talent_block_start(class_id: int) -> int:
         raise ValueError(f"Unsupported character class ID: {class_id}.") from exc
 
 
+def character_class_id(text: str) -> int:
+    """Return and validate the character class stored in a save."""
+    class_raw = get_ini_value(text, "0", "class")
+    try:
+        value = parse_number(class_raw)
+        class_id = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Invalid character class value: {class_raw!r}.") from exc
+    if value != class_id or class_id not in CLASS_ID_TO_NAME:
+        raise ValueError(f"Unsupported character class value: {class_raw!r}.")
+    return class_id
+
+
+def verified_class_subtalent_ids(class_id: int) -> frozenset[int]:
+    """Return only native active subskill IDs owned by one character class."""
+    block_start = class_talent_block_start(class_id)
+    return frozenset(
+        talent_id
+        for talent_id in range(block_start, block_start + 18)
+        if talent_id in S10_VERIFIED_SUBTALENT_IDS
+    )
+
+
 def small_subtalent_node_caps(talent_id: int) -> tuple[int, ...]:
     """Return the game-verified s1-s10 rank caps for one active talent."""
     if talent_id not in S10_VERIFIED_SUBTALENT_IDS:
@@ -1120,6 +1193,26 @@ def small_subtalent_node_caps(talent_id: int) -> tuple[int, ...]:
     ):
         raise ValueError(f"Talent t{talent_id} has an invalid verified subskill limit table.")
     return caps
+
+
+def selected_major_subtalent_node(nodes: dict[str, object]) -> int | None:
+    """Return one selected major node, rejecting malformed or conflicting data."""
+    selected: list[int] = []
+    for node_id in S10_MAJOR_SUBTALENT_NODE_IDS:
+        key = f"s{node_id}"
+        raw_value = nodes.get(key, 0) or 0
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Major subskill {key} has an invalid rank: {raw_value!r}.") from exc
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Major subskill {key} has an invalid rank: {raw_value!r}.")
+        if value > 0:
+            selected.append(node_id)
+    if len(selected) > 1:
+        joined = ", ".join(f"s{node_id}" for node_id in selected)
+        raise ValueError(f"More than one major subskill is active: {joined}.")
+    return selected[0] if selected else None
 
 
 def talent_names_from_translations(talent_text: str) -> dict[str, str]:
@@ -1166,7 +1259,6 @@ def active_subtalent_offsets_from_translations(
     class_prefix: str,
     talent_text: str,
     subtalent_text: str,
-    allocated_offsets: set[int] | None = None,
 ) -> tuple[int, ...]:
     """Resolve active-skill positions using the EXE-confirmed 18-talent order."""
     parent_pattern = re.compile(
@@ -1201,7 +1293,6 @@ def subtalent_tree_definitions_from_translations(
     class_id: int,
     talent_text: str,
     subtalent_text: str,
-    allocated_offsets: set[int] | None = None,
 ) -> tuple[SubtalentTreeDefinition, ...]:
     """Resolve localized node names for every active skill in one class block."""
     parent_pattern = re.compile(
@@ -1252,11 +1343,7 @@ def resolve_allocated_subtalent_definitions(
     translation_pair: tuple[Path, Path] | None = None,
 ) -> tuple[SubtalentTreeDefinition, ...]:
     """Resolve allocated active skills and their current localized node names."""
-    class_raw = get_ini_value(text, "0", "class")
-    try:
-        class_id = int(parse_number(class_raw))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"Invalid character class value: {class_raw!r}.") from exc
+    class_id = character_class_id(text)
     class_prefix = CLASS_ID_TO_TRANSLATION_PREFIX.get(class_id)
     if not class_prefix:
         raise ValueError(f"Unsupported character class ID: {class_id}.")
@@ -1279,11 +1366,7 @@ def resolve_allocated_subtalent_ids(
     translation_pair: tuple[Path, Path] | None = None,
 ) -> set[int]:
     """Resolve allocated active skills without treating passive talents as trees."""
-    class_raw = get_ini_value(text, "0", "class")
-    try:
-        class_id = int(parse_number(class_raw))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"Invalid character class value: {class_raw!r}.") from exc
+    class_id = character_class_id(text)
     class_prefix = CLASS_ID_TO_TRANSLATION_PREFIX.get(class_id)
     if not class_prefix:
         raise ValueError(f"Unsupported character class ID: {class_id}.")
@@ -1306,6 +1389,42 @@ def resolve_allocated_subtalent_ids(
     return active_ids & allocated
 
 
+def migrate_legacy_subtalent_tree_ids(text: str, loadout_index: int) -> tuple[str, int]:
+    """Move trees written to known impossible native IDs by older releases."""
+    class_id = character_class_id(text)
+    migrations = S10_LEGACY_SUBTALENT_TREE_ID_MIGRATIONS.get(class_id)
+    if not migrations:
+        return text, 0
+
+    trees = decode_subtalent_map(text, loadout_index)
+    sources_by_target: dict[int, list[int]] = {}
+    for old_id, native_id in migrations.items():
+        sources_by_target.setdefault(native_id, []).append(old_id)
+
+    migrated = 0
+    for native_id, old_ids in sources_by_target.items():
+        native_key = f"t{native_id}"
+        present_sources = [f"t{old_id}" for old_id in old_ids if f"t{old_id}" in trees]
+        if not present_sources:
+            continue
+
+        native_nodes = trees.get(native_key)
+        # Never guess between duplicate histories or overwrite a populated native
+        # tree. The unknown trees remain byte-for-byte intact and are ignored by
+        # class-scoped editing until the player can resolve them in game.
+        if len(present_sources) != 1 or native_nodes:
+            continue
+
+        old_key = present_sources[0]
+        trees[native_key] = trees.pop(old_key)
+        migrated += 1
+    if not migrated:
+        return text, 0
+    encoded = encode_base64_json(trees)
+    text = set_ini_value(text, f"talent_loadout_{loadout_index}", "subtalents", encoded, "text")
+    return text, migrated
+
+
 def max_small_subtalent_nodes(
     text: str,
     loadout_index: int | None = None,
@@ -1317,16 +1436,35 @@ def max_small_subtalent_nodes(
     IDs. Passive talents never receive fabricated sub-skill data.
     """
     index = active_talent_loadout_index(text) if loadout_index is None else loadout_index
+    text, _migrated = migrate_legacy_subtalent_tree_ids(text, index)
     trees = decode_subtalent_map(text, index)
-    for talent_id in sorted(create_talent_ids or set()):
-        if talent_id < 0:
-            raise ValueError(f"Invalid active talent ID: {talent_id}.")
+    class_id = character_class_id(text)
+    class_active_ids = verified_class_subtalent_ids(class_id)
+    allocated_ids = allocated_talent_ids(text, index)
+    target_ids = class_active_ids & allocated_ids
+    ids_to_create: set[int] = set()
+    if create_talent_ids is not None:
+        requested_ids = set(create_talent_ids)
+        invalid_ids = requested_ids - target_ids
+        if invalid_ids:
+            invalid_text = ", ".join(f"t{talent_id}" for talent_id in sorted(invalid_ids))
+            raise ValueError(
+                f"These are not allocated active subskills for {CLASS_ID_TO_NAME[class_id]}: "
+                f"{invalid_text}."
+            )
+        target_ids = requested_ids
+        ids_to_create = requested_ids
+    for talent_id in sorted(ids_to_create):
         trees.setdefault(f"t{talent_id}", {})
     changed_nodes = 0
+    edited_tree_count = 0
     for tree_key, nodes in trees.items():
         if not re.fullmatch(r"t\d+", tree_key):
             raise ValueError(f"Invalid subskill tree key: {tree_key!r}.")
         talent_id = int(tree_key[1:])
+        if talent_id not in target_ids:
+            continue
+        edited_tree_count += 1
         caps = small_subtalent_node_caps(talent_id)
         for node_id, cap in zip(S10_SMALL_SUBTALENT_NODE_IDS, caps):
             key = f"s{node_id}"
@@ -1341,11 +1479,11 @@ def max_small_subtalent_nodes(
             nodes[key] = float(cap)
             changed_nodes += 1
 
-    if not trees:
+    if not edited_tree_count:
         return text, 0, 0
     encoded = encode_base64_json(trees)
     text = set_ini_value(text, f"talent_loadout_{index}", "subtalents", encoded, "text")
-    return text, len(trees), changed_nodes
+    return text, edited_tree_count, changed_nodes
 
 
 def apply_subtalent_allocations(
@@ -1356,10 +1494,15 @@ def apply_subtalent_allocations(
 ) -> tuple[str, int, int]:
     """Write game-valid small-node ranks and one optional 3/3 major."""
     index = active_talent_loadout_index(text) if loadout_index is None else loadout_index
+    text, _migrated = migrate_legacy_subtalent_tree_ids(text, index)
     trees = decode_subtalent_map(text, index)
+    class_active_ids = verified_class_subtalent_ids(character_class_id(text))
+    allocated_ids = allocated_talent_ids(text, index)
     changed_nodes = 0
     for talent_id, (small_ranks, major_node_id) in allocations.items():
-        if verified_talent_ids is not None and talent_id not in verified_talent_ids:
+        if talent_id not in class_active_ids or talent_id not in allocated_ids or (
+            verified_talent_ids is not None and talent_id not in verified_talent_ids
+        ):
             raise ValueError(f"Talent t{talent_id} is not a verified allocated active skill.")
         if len(small_ranks) != len(S10_SMALL_SUBTALENT_NODE_IDS):
             raise ValueError(f"Talent t{talent_id} must provide exactly ten small-node ranks.")
@@ -2936,6 +3079,7 @@ class HssEditorApp:
             if self._character_field_vars_dirty:
                 text = self.merge_character_field_vars_into_text(text)
             loadout_index = active_talent_loadout_index(text)
+            text, _migrated_tree_count = migrate_legacy_subtalent_tree_ids(text, loadout_index)
             trees = decode_subtalent_map(text, loadout_index)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"Could not read the active subskill loadout:\n{exc}")
@@ -2950,12 +3094,16 @@ class HssEditorApp:
                 )
             resolved_ids = resolve_allocated_subtalent_ids(text, loadout_index, translation_pair)
         except Exception as exc:
-            resolved_ids = set()
             resolution_warning = str(exc)
+            resolved_ids = set(
+                verified_class_subtalent_ids(character_class_id(text))
+                & allocated_talent_ids(text, loadout_index)
+            )
 
-        existing_ids = {int(key[1:]) for key in trees}
-        target_ids = existing_ids | resolved_ids
-        missing_ids = resolved_ids - existing_ids
+        class_active_ids = verified_class_subtalent_ids(character_class_id(text))
+        existing_ids = {int(key[1:]) for key in trees} & class_active_ids & resolved_ids
+        target_ids = set(resolved_ids)
+        missing_ids = target_ids - existing_ids
         if not target_ids:
             details = f"\n\nResolver: {resolution_warning}" if resolution_warning else ""
             messagebox.showinfo(
@@ -2969,7 +3117,7 @@ class HssEditorApp:
         if resolution_warning:
             resolver_note = (
                 f"\n\nAdaptive resolver warning: {resolution_warning}\n"
-                "Only trees already present in the save will be changed."
+                "The editor's verified built-in class map will be used instead."
             )
         if not messagebox.askyesno(
             APP_TITLE,
@@ -3010,6 +3158,7 @@ class HssEditorApp:
             if self._character_field_vars_dirty:
                 text = self.merge_character_field_vars_into_text(text)
             loadout_index = active_talent_loadout_index(text)
+            text, _migrated_tree_count = migrate_legacy_subtalent_tree_ids(text, loadout_index)
             trees = decode_subtalent_map(text, loadout_index)
             translation_pair = self.locate_translation_pair(prompt=True)
             if translation_pair is None:
@@ -3042,14 +3191,14 @@ class HssEditorApp:
                     return
                 rank = int(rank_value)
                 small_ranks.append(rank)
-            selected_major = next(
-                (
-                    node_id
-                    for node_id in S10_MAJOR_SUBTALENT_NODE_IDS
-                    if float(nodes.get(f"s{node_id}", 0) or 0) > 0
-                ),
-                None,
-            )
+            try:
+                selected_major = selected_major_subtalent_node(nodes)
+            except ValueError as exc:
+                messagebox.showerror(
+                    APP_TITLE,
+                    f"{definition.skill_name} has invalid saved data.\n\n{exc}",
+                )
+                return
             working[definition.talent_id] = (small_ranks, selected_major)
 
         window = Toplevel(self.root)

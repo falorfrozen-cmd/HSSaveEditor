@@ -1,15 +1,19 @@
-# Hero Siege Save Editor v1.2.9
+# Hero Siege Save Editor v1.3.0
 
-## Fixes
+## What changed
 
-- Fixed Jotunn characters incorrectly reporting that they had no active skills to edit.
-- Corrected the native Season 10 talent-block order: Jotunn uses IDs 326-343 and Illusionist uses IDs 308-325.
-- Corrected the verified active-tree IDs and per-node limits for both classes.
-- Confirmed the fix against the supplied Jotunn save containing Breath of Ice (t327) and Portal of Ice (t332).
+- Fixed subskill editing for all 24 playable classes.
+- Fixed Paladin Holy Hammer.
+- Fixed Necromancer skills, including Skeleton Mage.
+- Fixed Marksman Gunner Drone and its higher point limits.
+- Fixed Jotunn and Illusionist skill detection.
+- Old saves made with earlier editor versions are handled more safely.
+- The editor now changes only skills that belong to the character and are currently active.
 
-## Verification
+## Tested
 
-- All 46 automated tests pass.
-- Rebuilt and smoke-tested the standalone Windows executable.
+- Every class and every current subskill tree was checked.
+- All 63 automated tests pass.
+- The Windows app was tested with real Marksman, Necromancer, Shaman, Bard and Jotunn saves.
 
-Offline/single-player saves only. Close the game before editing and keep the automatic backup.
+This tool is for offline characters only. Close Hero Siege before editing and keep the automatic backup.

@@ -37,12 +37,14 @@ The game must be fully closed before opening, editing, or saving a character fil
 - Preserves already allocated nodes; the displayed unspent balance is therefore `800 - allocated nodes`.
 - Preserves every existing Ether Tree node allocation in the separate `etherN.hss` sidecar.
 - Accepts the game's expanded Ether node IDs without a hard-coded upper limit, so newer valid sidecars remain readable after the tree grows.
-- Reads the installed game's current talent/subtalent translation tables and resolves allocated active skills in the current talent loadout.
+- Supports the current subskill trees for all 24 playable classes.
+- Reads the installed game's current talent/subtalent translation tables and resolves only the active skills used by the character.
 - Converts an existing local character to Odyssey by enabling the game's native `soloselffound` flag while preserving level, equipment, talents and quest progress.
 - Opens a per-skill subskill editor for the current talent loadout. Each of the ten small nodes (`s1-s10`) uses its own game-verified rank cap (1-8 depending on the tree/node); the editor shows the correct total capacity for that skill. Existing out-of-range saved ranks are preserved unless the player changes them.
 - Lets the player choose one mutually exclusive large/special node (`s11-s14`); the selected node is written directly at 3/3 and the other large nodes for that skill are cleared.
 - Does not depend on the in-game unspent-point counter. The chosen small and major ranks are written directly to the save, so no refund/max round trip is required.
-- Falls back to existing saved trees instead of guessing when the current game tables cannot be located or aligned.
+- Uses a verified built-in class map if the current game tables cannot be found.
+- Safely repairs known subskill IDs written by older editor releases without guessing when old data is unclear.
 - Saves with automatic timestamped backup.
 - Standalone Windows `.exe` build available.
 
