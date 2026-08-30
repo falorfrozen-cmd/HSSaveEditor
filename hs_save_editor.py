@@ -43,10 +43,14 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
+CHARACTER_BACKUP_NAME_PATTERN = re.compile(
+    r"^herosiege\d+\.hss\.bak_\d{8}_\d{6}$",
+    re.IGNORECASE,
+)
 S10_ACT_COUNT = 9
 S10_ZONE_SLOTS_PER_ACT = 10
 S10_MAX_CAMPAIGN_CLEAR = 4
@@ -59,7 +63,8 @@ CHARM_SLOT_QUEST_DIFFICULTY = 3
 CHARM_SLOT_MAX_CELLS = 30
 LEGACY_CHARM_SLOT_SAVE_SECTION = "0"
 LEGACY_CHARM_SLOT_SAVE_KEY = "charmSlot"
-S10_TARGET_TOTAL_ETHER_POINTS = 800
+S10_ETHER_POINT_CHOICES = tuple(range(100, 801, 100))
+S10_TARGET_TOTAL_ETHER_POINTS = S10_ETHER_POINT_CHOICES[-1]
 S10_TALENT_LOADOUT_COUNT = 8
 # Every current S10 sub-skill tree has fourteen local nodes. The first ten are
 # ordinary nodes with tree-specific rank caps; s11-s14 are mutually exclusive
@@ -645,6 +650,159 @@ def write_plain_ini_file(path: Path, text: str, create_backup: bool = True) -> P
 
     path.write_text(normalize_line_endings(text), encoding="utf-8", newline="\n")
     return backup_path
+
+
+def path_is_link_or_junction(path: Path) -> bool:
+    """Return True for file/directory links and Windows junctions."""
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(is_junction and is_junction())
+    except OSError:
+        return True
+
+
+def character_backup_directories(save_dir: Path) -> list[Path]:
+    """Return the save folders that can contain character backups.
+
+    Hero Siege installations are seen both with character saves directly in
+    the selected folder and inside its ``hs2saves`` child.  If the user chose
+    ``hs2saves`` itself, do not look for another nested copy.
+    """
+    save_dir = Path(save_dir)
+    candidates = [save_dir]
+    if save_dir.name.casefold() != "hs2saves":
+        candidates.append(save_dir / "hs2saves")
+    directories: list[Path] = []
+    for directory in candidates:
+        try:
+            if path_is_link_or_junction(directory) or not directory.is_dir():
+                continue
+            directory.resolve(strict=True)
+        except OSError:
+            continue
+        directories.append(directory)
+    return directories
+
+
+def directory_identity(path: Path) -> tuple[str, int, int]:
+    """Return a stable directory identity for scope checks before deletion."""
+    stat_result = path.stat(follow_symlinks=False)
+    resolved = os.path.normcase(str(path.resolve(strict=True)))
+    return (resolved, stat_result.st_dev, stat_result.st_ino)
+
+
+def regular_file_identity(path: Path) -> tuple[int, int, int, int, int]:
+    """Return identity and metadata that change when a file is replaced."""
+    stat_result = path.stat(follow_symlinks=False)
+    return (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
+    )
+
+
+def lexical_path_key(path: Path) -> str:
+    """Normalize a path without following links or junctions."""
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+@dataclass(frozen=True)
+class CharacterBackupSnapshot:
+    path: Path
+    parent_identity: tuple[str, int, int]
+    file_identity: tuple[int, int, int, int, int]
+    size: int
+
+
+def scan_character_backup_files(save_dir: Path) -> list[CharacterBackupSnapshot]:
+    """Snapshot only timestamped ``herosiegeN.hss`` backups made by this editor."""
+    backups: list[CharacterBackupSnapshot] = []
+    for directory in character_backup_directories(save_dir):
+        try:
+            parent_identity = directory_identity(directory)
+        except OSError:
+            continue
+        for path in directory.iterdir():
+            if not CHARACTER_BACKUP_NAME_PATTERN.fullmatch(path.name):
+                continue
+            try:
+                if path_is_link_or_junction(path) or not path.is_file():
+                    continue
+                file_identity = regular_file_identity(path)
+                if directory_identity(directory) != parent_identity:
+                    continue
+            except OSError:
+                continue
+            backups.append(
+                CharacterBackupSnapshot(
+                    path=path,
+                    parent_identity=parent_identity,
+                    file_identity=file_identity,
+                    size=file_identity[2],
+                )
+            )
+    return sorted(
+        backups,
+        key=lambda backup: (backup.path.name.casefold(), str(backup.path.parent).casefold()),
+    )
+
+
+def find_character_backup_files(save_dir: Path) -> list[Path]:
+    """Return paths from a safe pre-deletion character-backup snapshot."""
+    return [backup.path for backup in scan_character_backup_files(save_dir)]
+
+
+def delete_character_backup_files(
+    save_dir: Path,
+    backups: list[CharacterBackupSnapshot],
+) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """Delete only backups whose pre-confirmation identities still match."""
+    deleted: list[Path] = []
+    failures: list[tuple[Path, str]] = []
+    save_dir = Path(save_dir)
+    allowed_parent_keys = {lexical_path_key(save_dir)}
+    if save_dir.name.casefold() != "hs2saves":
+        allowed_parent_keys.add(lexical_path_key(save_dir / "hs2saves"))
+
+    for backup in backups:
+        path = backup.path
+        if not CHARACTER_BACKUP_NAME_PATTERN.fullmatch(path.name):
+            failures.append((path, "not a recognized character backup"))
+            continue
+        try:
+            if lexical_path_key(path.parent) not in allowed_parent_keys:
+                failures.append((path, "backup is outside the selected save scope"))
+                continue
+            if path_is_link_or_junction(path.parent):
+                failures.append((path, "backup folder is linked or outside the selected save scope"))
+                continue
+            if directory_identity(path.parent) != backup.parent_identity:
+                failures.append((path, "backup folder changed after confirmation"))
+                continue
+            if path_is_link_or_junction(path) or not path.is_file():
+                failures.append((path, "backup is missing or is not a regular file"))
+                continue
+            if regular_file_identity(path) != backup.file_identity:
+                failures.append((path, "backup file changed after confirmation"))
+                continue
+            # Recheck both identities immediately before unlinking so neither
+            # the folder nor the file can be silently replaced after review.
+            if (
+                directory_identity(path.parent) != backup.parent_identity
+                or regular_file_identity(path) != backup.file_identity
+            ):
+                failures.append((path, "backup changed after confirmation"))
+                continue
+            path.unlink()
+        except OSError as exc:
+            failures.append((path, str(exc)))
+        else:
+            deleted.append(path)
+    return deleted, failures
 
 
 def ether_path_for_character(path: Path) -> Path:
@@ -1848,6 +2006,33 @@ def ether_earned_points(text: str) -> int:
     return int(total)
 
 
+def active_ether_loadout_index_from_text(text: str) -> int:
+    """Return the character's actual active Ether loadout from its save text."""
+    raw = get_ini_value(text, "0", "ether_loadout") or "0"
+    value = parse_number(raw)
+    if not float(value).is_integer():
+        raise ValueError(f"Invalid Ether loadout value: {raw!r}.")
+    index = int(value)
+    if not 0 <= index < ETHER_LOADOUT_COUNT:
+        raise ValueError(f"Ether loadout must be between 0 and {ETHER_LOADOUT_COUNT - 1}.")
+    return index
+
+
+def validate_ether_point_target(target_earned: int, allocated_nodes: int = 0) -> int:
+    """Validate a preset total and return the points left after allocations."""
+    if target_earned not in S10_ETHER_POINT_CHOICES:
+        choices = ", ".join(str(value) for value in S10_ETHER_POINT_CHOICES)
+        raise ValueError(f"Ether Points must be one of: {choices}.")
+    if allocated_nodes < 0:
+        raise ValueError("Allocated Ether nodes cannot be negative.")
+    if target_earned < allocated_nodes:
+        raise ValueError(
+            f"{allocated_nodes} Ether Points are already allocated. "
+            f"Choose at least {allocated_nodes} total points or reset the Ether Tree first."
+        )
+    return target_earned - allocated_nodes
+
+
 def grant_available_ether_points(text: str, target_available: int, allocated_nodes: int = 0) -> str:
     """Set the earned total so the active loadout has target_available points."""
     if target_available < 0 or allocated_nodes < 0:
@@ -1900,6 +2085,7 @@ class HssEditorApp:
         # Kept internally for sidecar diagnostics; the release UI grants
         # points through native quest progress instead of exposing node IDs.
         self.ether_window: Toplevel | None = None
+        self.ether_points_window: Toplevel | None = None
         self.ether_path: Path | None = None
         self.ether_data: dict[str, object] | None = None
         self.ether_loadout_list: Listbox | None = None
@@ -2228,6 +2414,12 @@ class HssEditorApp:
         self.make_button(folder_actions, "Refresh", self.refresh_file_list).grid(
             row=0, column=1, sticky="ew", padx=(4, 0)
         )
+        self.make_button(
+            folder_actions,
+            "DELETE CHARACTER BACKUPS",
+            self.clean_character_backups,
+            danger=True,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         Label(
             sidebar,
@@ -2502,8 +2694,8 @@ class HssEditorApp:
         ).grid(row=1, column=0, sticky="ew", padx=(0, 5), pady=(5, 0))
         self.make_button(
             unlock_actions,
-            "Give 800 Ether Points",
-            self.apply_unlock_all_ether_points,
+            "ETHER POINTS",
+            self.open_ether_points_selector,
             bg=UI_ETHER,
             active_bg=UI_ETHER_DARK,
             fg="#ecfeff",
@@ -2567,6 +2759,73 @@ class HssEditorApp:
             self.save_dir = Path(selected)
             self.folder_label.config(text=str(self.save_dir))
             self.refresh_file_list()
+
+    def clean_character_backups(self) -> None:
+        try:
+            backups = scan_character_backup_files(self.save_dir)
+        except OSError as exc:
+            messagebox.showerror(
+                APP_TITLE,
+                f"Could not scan the save folder for character backups:\n{exc}",
+                parent=self.root,
+            )
+            return
+
+        if not backups:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No automatic character backups were found.\n\n"
+                "Stash, Shop, Ether, and current character saves were not touched.",
+                parent=self.root,
+            )
+            self.set_status("No character backups found. Nothing was deleted.")
+            return
+
+        total_bytes = sum(backup.size for backup in backups)
+        total_size = (
+            f"{total_bytes / (1024 * 1024):.2f} MB"
+            if total_bytes >= 1024 * 1024
+            else f"{total_bytes / 1024:.1f} KB"
+        )
+
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Delete {len(backups)} automatic character backup(s) ({total_size})?\n\n"
+            "Only files named like herosiegeN.hss.bak_YYYYMMDD_HHMMSS will be deleted.\n"
+            "Current character saves, Stash, Shop, and Ether files will stay untouched.\n\n"
+            "This cannot be undone.",
+            icon="warning",
+            default="no",
+            parent=self.root,
+        ):
+            self.set_status("Character backup cleanup cancelled.")
+            return
+
+        deleted, failures = delete_character_backup_files(self.save_dir, backups)
+        if failures:
+            failed_names = "\n".join(f"- {path.name}: {reason}" for path, reason in failures[:8])
+            if len(failures) > 8:
+                failed_names += f"\n- ... and {len(failures) - 8} more"
+            self.set_status(
+                f"Deleted {len(deleted)} character backup(s); "
+                f"{len(failures)} could not be deleted."
+            )
+            messagebox.showwarning(
+                APP_TITLE,
+                f"Deleted {len(deleted)} character backup(s).\n\n"
+                f"Could not delete {len(failures)} file(s):\n{failed_names}\n\n"
+                "No current save or non-character file was changed.",
+                parent=self.root,
+            )
+            return
+
+        self.set_status(f"Deleted {len(deleted)} automatic character backup(s).")
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Deleted {len(deleted)} automatic character backup(s).\n\n"
+            "Current character saves, Stash, Shop, and Ether files were not touched.",
+            parent=self.root,
+        )
 
     def refresh_file_list(self) -> None:
         self.file_list.delete(0, END)
@@ -3036,39 +3295,231 @@ class HssEditorApp:
         self.populate_fields_from_raw(show_errors=False, update_status=False)
         self.set_status("All 30 charm slots are ready. Click Save Character to finish.")
 
-    def apply_unlock_all_ether_points(self) -> None:
+    def close_ether_points_selector(self) -> None:
+        window = self.ether_points_window
+        if window is not None and window.winfo_exists():
+            try:
+                window.grab_release()
+            except Exception:
+                pass
+            window.destroy()
+        self.ether_points_window = None
+
+    def stage_ether_point_target(
+        self,
+        target_earned: int,
+        allocated_nodes: int,
+        *,
+        parent: Toplevel | None = None,
+    ) -> bool:
+        """Stage one validated Ether total in the raw character text."""
         if not self.loaded:
-            messagebox.showinfo(APP_TITLE, "Open a character first.")
-            return
+            messagebox.showinfo(APP_TITLE, "Open a character first.", parent=self.root)
+            return False
+        dialog_parent = parent if parent is not None else self.root
         try:
-            ether_path = ether_path_for_character(self.loaded.path)
-            ether_data = read_ether_file(ether_path)
-            active_loadout = self.active_ether_loadout_index()
-            allocated_nodes = len(ether_loadout_nodes(ether_data, active_loadout))
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Could not read the Ether Tree:\n{exc}")
-            return
-        target_earned = S10_TARGET_TOTAL_ETHER_POINTS
-        expected_available = max(0, target_earned - allocated_nodes)
+            expected_available = validate_ether_point_target(target_earned, allocated_nodes)
+        except ValueError as exc:
+            messagebox.showwarning(APP_TITLE, str(exc), parent=dialog_parent)
+            return False
         if not messagebox.askyesno(
             APP_TITLE,
-            f"Give this character {target_earned} total Ether Points?\n\n"
+            f"Set this character to {target_earned} total Ether Points?\n\n"
+            f"Currently allocated: {allocated_nodes}\n"
             f"Points available after current upgrades: {expected_available}\n\n"
             "Your current Ether upgrades will stay the same. You still need to click Save Character.",
-            parent=self.root,
+            parent=dialog_parent,
         ):
-            return
+            return False
         try:
             text = self.get_raw()
             if self._character_field_vars_dirty:
                 text = self.merge_character_field_vars_into_text(text)
             text = set_total_ether_points(text, target_earned)
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Could not unlock the Ether Points:\n{exc}")
-            return
+            messagebox.showerror(APP_TITLE, f"Could not set the Ether Points:\n{exc}", parent=dialog_parent)
+            return False
         self.set_raw(text)
-        self.populate_fields_from_raw(show_errors=False, update_status=False)
+        # Ether progress lives outside the visible character/shop fields. Do
+        # not repopulate the form here: doing so would replace unsaved Gold or
+        # profession edits with values from loaded.shop_text and clear the
+        # dirty flag before Save Character can persist them.
         self.set_status(f"{target_earned} Ether Points are ready. Click Save Character to finish.")
+        return True
+
+    def open_ether_points_selector(self) -> None:
+        if not self.loaded:
+            messagebox.showinfo(APP_TITLE, "Open a character first.", parent=self.root)
+            return
+        if self.ether_points_window is not None and self.ether_points_window.winfo_exists():
+            self.ether_points_window.lift()
+            self.ether_points_window.focus_force()
+            return
+
+        try:
+            text = self.get_raw()
+            if self._character_field_vars_dirty:
+                text = self.merge_character_field_vars_into_text(text)
+            current_earned = ether_earned_points(text)
+            ether_path = ether_path_for_character(self.loaded.path)
+            ether_data = read_ether_file(ether_path)
+            active_loadout = active_ether_loadout_index_from_text(text)
+            allocated_nodes = len(ether_loadout_nodes(ether_data, active_loadout))
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not read the Ether state:\n{exc}", parent=self.root)
+            return
+
+        if allocated_nodes > S10_ETHER_POINT_CHOICES[-1]:
+            messagebox.showwarning(
+                APP_TITLE,
+                f"This character already has {allocated_nodes} allocated Ether Points.\n\n"
+                f"The largest preset is {S10_ETHER_POINT_CHOICES[-1]}. "
+                "Reset the Ether Tree before choosing a lower total.",
+                parent=self.root,
+            )
+            return
+
+        window = Toplevel(self.root)
+        self.ether_points_window = window
+        window.title(f"{APP_TITLE} - Ether Points")
+        window.configure(bg=UI_BG)
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", self.close_ether_points_selector)
+        window.bind("<Escape>", lambda _event: self.close_ether_points_selector())
+
+        body = Frame(window, bg=UI_BG, padx=20, pady=18)
+        body.pack(fill=BOTH, expand=True)
+        Label(
+            body,
+            text="SET ETHER POINTS",
+            bg=UI_BG,
+            fg=UI_GOLD_BRIGHT,
+            font=("Segoe UI Semibold", 15),
+        ).pack(anchor="w")
+        Label(
+            body,
+            text=(
+                "Choose the character's total earned Ether Points. Existing upgrades stay allocated, "
+                "and nothing is written to disk until Save Character."
+            ),
+            wraplength=420,
+            justify="left",
+            bg=UI_BG,
+            fg=UI_MUTED,
+        ).pack(anchor="w", fill=X, pady=(4, 12))
+
+        summary = Frame(
+            body,
+            bg=UI_CARD_2,
+            padx=12,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+        )
+        summary.pack(fill=X)
+        Label(
+            summary,
+            text=f"Current total: {current_earned}    •    Allocated: {allocated_nodes}",
+            bg=UI_CARD_2,
+            fg=UI_TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).pack(anchor="w")
+
+        chooser = Frame(body, bg=UI_BG)
+        chooser.pack(fill=X, pady=(14, 0))
+        Label(chooser, text="Total Ether Points", bg=UI_BG, fg=UI_MUTED).pack(anchor="w")
+        target_var = StringVar(value=str(S10_TARGET_TOTAL_ETHER_POINTS))
+        target_combo = ttk.Combobox(
+            chooser,
+            textvariable=target_var,
+            values=tuple(str(value) for value in S10_ETHER_POINT_CHOICES),
+            state="readonly",
+            style="Modern.TCombobox",
+            width=20,
+        )
+        target_combo.pack(fill=X, pady=(5, 0))
+
+        preview_var = StringVar()
+        preview_label = Label(
+            body,
+            textvariable=preview_var,
+            bg=UI_BG,
+            fg=UI_NOTICE,
+            justify="left",
+        )
+        preview_label.pack(anchor="w", fill=X, pady=(8, 0))
+
+        actions = Frame(body, bg=UI_BG)
+        actions.pack(fill=X, pady=(16, 0))
+
+        def apply_selection() -> None:
+            if str(apply_button.cget("state")) == "disabled":
+                return
+            try:
+                target = int(target_var.get())
+            except ValueError:
+                messagebox.showerror(APP_TITLE, "Choose a valid Ether Points preset.", parent=window)
+                return
+            if self.stage_ether_point_target(target, allocated_nodes, parent=window):
+                self.close_ether_points_selector()
+
+        apply_button = self.make_button(
+            actions,
+            "Apply Changes",
+            apply_selection,
+            bg=UI_ETHER,
+            active_bg=UI_ETHER_DARK,
+            fg="#ecfeff",
+        )
+        apply_button.pack(side=RIGHT)
+        cancel_button = self.make_button(actions, "Cancel", self.close_ether_points_selector)
+        cancel_button.pack(
+            side=RIGHT,
+            padx=(0, 8),
+        )
+
+        def update_preview(_event: object | None = None) -> None:
+            target = int(target_var.get())
+            try:
+                available = validate_ether_point_target(target, allocated_nodes)
+            except ValueError:
+                preview_var.set(
+                    f"Unavailable: {allocated_nodes} points are already allocated. Choose a higher total."
+                )
+                preview_label.configure(fg=UI_DANGER)
+                apply_button.configure(state="disabled")
+                return
+            preview_var.set(f"After change: {available} points available for this loadout.")
+            preview_label.configure(fg=UI_NOTICE)
+            apply_button.configure(state="normal")
+
+        def apply_on_return(_event: object) -> str:
+            apply_selection()
+            return "break"
+
+        def cancel_on_return(_event: object) -> str:
+            self.close_ether_points_selector()
+            return "break"
+
+        target_combo.bind("<<ComboboxSelected>>", update_preview)
+        target_combo.bind("<Return>", apply_on_return)
+        apply_button.bind("<Return>", apply_on_return)
+        cancel_button.bind("<Return>", cancel_on_return)
+        update_preview()
+
+        window.update_idletasks()
+        width = 470
+        height = max(310, window.winfo_reqheight())
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - width) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - height) // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.grab_set()
+        target_combo.focus_set()
+
+    def apply_unlock_all_ether_points(self) -> None:
+        """Backward-compatible entry point for the selectable Ether Points UI."""
+        self.open_ether_points_selector()
 
     def apply_max_small_subtalents(self) -> None:
         if not self.loaded:

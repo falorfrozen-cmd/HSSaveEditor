@@ -2,7 +2,7 @@
 
 A Windows save editor for offline Hero Siege character `.hss` files, presented in a responsive Season 10-inspired Character Save Forge interface.
 
-The editor can load local character saves, edit common character fields, update shared `shop.ini` values such as gold/professions, unlock Season 10 waypoints and difficulties, set a controlled total of 800 Ether Points, and directly edit each active skill's small-node allocation plus its selected major node. It also creates a backup before saving.
+The editor can load local character saves, edit common character fields, update shared `shop.ini` values such as gold/professions, unlock Season 10 waypoints and difficulties, set a controlled total of 100-800 Ether Points, and directly edit each active skill's small-node allocation plus its selected major node. It also creates a backup before saving.
 
 ## Download
 
@@ -33,8 +33,8 @@ The game must be fully closed before opening, editing, or saving a character fil
 - Unlocks all Season 10 act/zone waypoints only for the currently selected difficulty, including Act 9 and the expanded zone slots, without marking the Act 9 campaign as cleared.
 - Unlocks Normal, Nightmare, Hell, and Inferno through the native Act 9 campaign-clear gate without changing the selected difficulty or waypoint table.
 - Unlocks the complete native 30-cell charm grid by completing Season 10's `Light of Dawn` reward state (`fallOfDarkness|4`). Legacy synthetic `charmSlot` fields from older editor builds are removed automatically.
-- Sets the character to exactly 800 total earned Ether Points through the game's nine native Ether quest-chain progress records.
-- Preserves already allocated nodes; the displayed unspent balance is therefore `800 - allocated nodes`.
+- Opens an `ETHER POINTS` picker with exact totals of 100, 200, 300, 400, 500, 600, 700, or 800, written through the game's nine native Ether quest-chain progress records.
+- Preserves already allocated nodes; the picker shows the resulting unspent balance and blocks totals below the points already allocated in the active loadout.
 - Preserves every existing Ether Tree node allocation in the separate `etherN.hss` sidecar.
 - Accepts the game's expanded Ether node IDs without a hard-coded upper limit, so newer valid sidecars remain readable after the tree grows.
 - Supports the current subskill trees for all 24 playable classes.
@@ -46,6 +46,7 @@ The game must be fully closed before opening, editing, or saving a character fil
 - Uses a verified built-in class map if the current game tables cannot be found.
 - Safely repairs known subskill IDs written by older editor releases without guessing when old data is unclear.
 - Saves with automatic timestamped backup.
+- Cleans up automatic character backups on request with a confirmation step; current saves, Stash, `shop.ini`, and Ether files are never included.
 - Standalone Windows `.exe` build available.
 
 ## How To Use
@@ -58,6 +59,10 @@ The game must be fully closed before opening, editing, or saving a character fil
 6. Start the game again.
 
 Backups are created next to the edited save file.
+
+To change Ether Points, press `ETHER POINTS`, choose the total earned value, and confirm. Existing Ether Tree upgrades stay allocated, so the available balance is the chosen total minus the active loadout's allocated nodes. The change remains staged until you press `Save Character`.
+
+To remove old character backups, choose the save folder and press `Delete Character Backups`. The cleanup matches only files named like `herosiegeN.hss.bak_YYYYMMDD_HHMMSS` in that folder (and its direct, non-linked `hs2saves` folder). Symlinks and Windows junctions are not followed. It does not delete current character saves or any Stash, Shop, or Ether file.
 
 Gold and profession changes are saved to `shop.ini` in the same save folder. The editor finds it automatically.
 

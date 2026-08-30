@@ -2,8 +2,10 @@ import base64
 import hashlib
 import json
 import tempfile
+import tkinter as tk
 import unittest
 from pathlib import Path
+from tkinter import ttk
 from unittest.mock import patch
 
 import hs_save_editor as editor
@@ -43,7 +45,277 @@ def sample_save_for_class(
     return text
 
 
+class CharacterBackupCleanupTests(unittest.TestCase):
+    @staticmethod
+    def make_cleanup_app(save_dir: Path):
+        app = object.__new__(editor.HssEditorApp)
+        app.save_dir = save_dir
+        app.root = None
+        app.status_messages = []
+        app.set_status = app.status_messages.append
+        return app
+
+    def test_find_and_delete_only_supported_character_backups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_dir = Path(directory)
+            hs2saves = save_dir / "hs2saves"
+            deeper = hs2saves / "archive"
+            deeper.mkdir(parents=True)
+
+            character_backups = {
+                save_dir / "herosiege1.hss.bak_20260830_120000",
+                hs2saves / "herosiege24.hss.bak_20260830_120001",
+            }
+            protected_files = {
+                save_dir / "herosiege1.hss",
+                hs2saves / "herosiege24.hss",
+                save_dir / "stash.hss.bak_20260830_120002",
+                save_dir / "shop.ini.bak_20260830_120003",
+                hs2saves / "ether24.hss.bak_20260830_120004",
+                save_dir / "hero2.hss.bak_20260830_120005",
+                save_dir / "herosiege2.hss.bak_2026-08-30_120006",
+                deeper / "herosiege3.hss.bak_20260830_120007",
+            }
+
+            for path in character_backups:
+                path.write_bytes(b"automatic character backup")
+            for index, path in enumerate(sorted(protected_files)):
+                path.write_bytes(f"protected-{index}".encode("ascii"))
+            protected_contents = {
+                path: path.read_bytes() for path in protected_files
+            }
+
+            snapshots = editor.scan_character_backup_files(save_dir)
+            found = [backup.path for backup in snapshots]
+
+            self.assertEqual(set(found), character_backups)
+            deleted, failures = editor.delete_character_backup_files(save_dir, snapshots)
+            self.assertEqual(set(deleted), character_backups)
+            self.assertEqual(failures, [])
+            self.assertTrue(all(not path.exists() for path in character_backups))
+            for path, expected in protected_contents.items():
+                with self.subTest(path=path):
+                    self.assertTrue(path.is_file())
+                    self.assertEqual(path.read_bytes(), expected)
+
+    def test_delete_rejects_matching_backup_outside_selected_save_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            save_dir = base / "selected"
+            outside_dir = base / "outside"
+            save_dir.mkdir()
+            outside_dir.mkdir()
+            outside_backup = outside_dir / "herosiege1.hss.bak_20260830_120000"
+            outside_backup.write_bytes(b"outside scope")
+            outside_snapshots = editor.scan_character_backup_files(outside_dir)
+
+            deleted, failures = editor.delete_character_backup_files(
+                save_dir,
+                outside_snapshots,
+            )
+
+            self.assertEqual(deleted, [])
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(outside_backup.read_bytes(), b"outside scope")
+
+    def test_cleanup_does_not_follow_hs2saves_link_swapped_after_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            save_dir = base / "selected"
+            hs2saves = save_dir / "hs2saves"
+            outside_dir = base / "outside"
+            hs2saves.mkdir(parents=True)
+            outside_dir.mkdir()
+            scanned_backup = hs2saves / "herosiege1.hss.bak_20260830_120000"
+            scanned_backup.write_bytes(b"original backup")
+            scanned = editor.scan_character_backup_files(save_dir)
+            self.assertEqual([backup.path for backup in scanned], [scanned_backup])
+
+            original_dir = save_dir / "original_hs2saves"
+            hs2saves.rename(original_dir)
+            outside_backup = outside_dir / scanned_backup.name
+            outside_backup.write_bytes(b"outside backup")
+            try:
+                hs2saves.symlink_to(outside_dir, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            deleted, failures = editor.delete_character_backup_files(save_dir, scanned)
+
+            self.assertEqual(deleted, [])
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(outside_backup.read_bytes(), b"outside backup")
+            self.assertEqual(
+                (original_dir / scanned_backup.name).read_bytes(),
+                b"original backup",
+            )
+
+    def test_cleanup_rejects_plain_folder_replacement_after_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            save_dir = base / "selected"
+            hs2saves = save_dir / "hs2saves"
+            replacement = base / "replacement"
+            hs2saves.mkdir(parents=True)
+            replacement.mkdir()
+            backup_name = "herosiege1.hss.bak_20260830_120000"
+            scanned_backup = hs2saves / backup_name
+            replacement_backup = replacement / backup_name
+            scanned_backup.write_bytes(b"confirmed original")
+            replacement_backup.write_bytes(b"not confirmed")
+            scanned = editor.scan_character_backup_files(save_dir)
+
+            original_dir = save_dir / "original_hs2saves"
+            hs2saves.rename(original_dir)
+            replacement.rename(hs2saves)
+            deleted, failures = editor.delete_character_backup_files(save_dir, scanned)
+
+            self.assertEqual(deleted, [])
+            self.assertEqual(len(failures), 1)
+            self.assertEqual((hs2saves / backup_name).read_bytes(), b"not confirmed")
+            self.assertEqual(
+                (original_dir / backup_name).read_bytes(),
+                b"confirmed original",
+            )
+
+    def test_cleanup_rejects_backup_file_changed_after_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_dir = Path(directory)
+            backup = save_dir / "herosiege1.hss.bak_20260830_120000"
+            backup.write_bytes(b"confirmed contents")
+            scanned = editor.scan_character_backup_files(save_dir)
+            backup.write_bytes(b"changed after confirmation")
+
+            deleted, failures = editor.delete_character_backup_files(save_dir, scanned)
+
+            self.assertEqual(deleted, [])
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(backup.read_bytes(), b"changed after confirmation")
+
+    def test_direct_hs2saves_selection_scans_that_folder_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hs2saves = Path(directory) / "hs2saves"
+            nested = hs2saves / "hs2saves"
+            nested.mkdir(parents=True)
+            direct_backup = hs2saves / "herosiege1.hss.bak_20260830_120000"
+            nested_backup = nested / "herosiege2.hss.bak_20260830_120001"
+            direct_backup.write_bytes(b"direct")
+            nested_backup.write_bytes(b"nested")
+
+            self.assertEqual(editor.find_character_backup_files(hs2saves), [direct_backup])
+
+    def test_cleanup_button_does_not_delete_without_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / "herosiege1.hss.bak_20260830_120000"
+            backup.write_bytes(b"keep until confirmed")
+            app = self.make_cleanup_app(Path(directory))
+
+            with patch.object(editor.messagebox, "askyesno", return_value=False) as confirm:
+                app.clean_character_backups()
+
+            self.assertTrue(backup.is_file())
+            confirm.assert_called_once()
+            self.assertEqual(app.status_messages[-1], "Character backup cleanup cancelled.")
+
+    def test_cleanup_button_deletes_character_backup_after_confirmation_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_dir = Path(directory)
+            character_backup = save_dir / "herosiege1.hss.bak_20260830_120000"
+            stash_backup = save_dir / "stash.hss.bak_20260830_120001"
+            character_backup.write_bytes(b"delete me")
+            stash_backup.write_bytes(b"keep me")
+            app = self.make_cleanup_app(save_dir)
+
+            with (
+                patch.object(editor.messagebox, "askyesno", return_value=True) as confirm,
+                patch.object(editor.messagebox, "showinfo") as success,
+            ):
+                app.clean_character_backups()
+
+            self.assertFalse(character_backup.exists())
+            self.assertEqual(stash_backup.read_bytes(), b"keep me")
+            confirm.assert_called_once()
+            success.assert_called_once()
+            self.assertEqual(
+                app.status_messages[-1],
+                "Deleted 1 automatic character backup(s).",
+            )
+
+
 class Season10ProgressTests(unittest.TestCase):
+    @staticmethod
+    def make_ether_stage_app(save_path: Path):
+        app = object.__new__(editor.HssEditorApp)
+        app.root = object()
+        app.loaded = editor.LoadedSave(save_path, SAMPLE_SAVE, "character")
+        app.raw_text = None
+        app.raw_buffer = SAMPLE_SAVE
+        app._character_field_vars_dirty = False
+        app.populate_fields_from_raw = lambda **_kwargs: None
+        app.status_messages = []
+        app.set_status = app.status_messages.append
+        return app
+
+    @staticmethod
+    def iter_tk_descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from Season10ProgressTests.iter_tk_descendants(child)
+
+    def make_tk_ether_selector_app(self, sidecar_nodes=()):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display is unavailable: {exc}")
+
+        root.geometry("900x700+-30000+-30000")
+        root.update_idletasks()
+        root.deiconify()
+        root.update()
+        style = ttk.Style(root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure("Modern.TCombobox")
+
+        app = object.__new__(editor.HssEditorApp)
+        app.root = root
+        app.loaded = editor.LoadedSave(
+            Path(r"C:\nonexistent\herosiege1.hss"),
+            SAMPLE_SAVE,
+            "character_ini",
+        )
+        app.raw_text = None
+        app.raw_buffer = SAMPLE_SAVE
+        app._character_field_vars_dirty = False
+        app._suppress_field_trace = False
+        app.field_vars = {}
+        app.field_widgets = {}
+        app.ether_points_window = None
+        app.populate_fields_from_raw = lambda **_kwargs: None
+        app.status_messages = []
+        app.set_status = app.status_messages.append
+
+        def cleanup():
+            try:
+                app.close_ether_points_selector()
+            except (AttributeError, tk.TclError):
+                pass
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
+
+        self.addCleanup(cleanup)
+
+        sidecar = editor.default_ether_data()
+        if sidecar_nodes:
+            sidecar["loadouts"][0]["nodes"] = list(sidecar_nodes)
+        with patch.object(editor, "read_ether_file", return_value=sidecar):
+            app.open_ether_points_selector()
+        root.update()
+        self.assertIsNotNone(app.ether_points_window)
+        return root, app
+
     def test_class_ids_match_current_game_assets(self):
         self.assertEqual(editor.CLASS_ID_TO_NAME[18], "Jötunn")
         self.assertEqual(editor.CLASS_ID_TO_NAME[19], "Illusionist")
@@ -260,6 +532,274 @@ class Season10ProgressTests(unittest.TestCase):
         entries = editor.quest_chain_entries(result)
         self.assertEqual(entries[5], ("etheringHell", 8))
         self.assertEqual(entries[9], ("etheringHell", 6))
+
+    def test_s10_ether_point_choices_are_exact_hundred_point_presets(self):
+        self.assertEqual(editor.S10_ETHER_POINT_CHOICES, tuple(range(100, 801, 100)))
+
+    def test_set_total_ether_points_is_exact_and_idempotent_for_every_preset(self):
+        for target in editor.S10_ETHER_POINT_CHOICES:
+            with self.subTest(target=target):
+                first = editor.set_total_ether_points(SAMPLE_SAVE, target)
+                second = editor.set_total_ether_points(first, target)
+
+                self.assertEqual(editor.ether_earned_points(first), target)
+                self.assertEqual(second, first)
+
+    def test_validate_ether_point_target_accepts_presets_and_returns_available_points(self):
+        for target in editor.S10_ETHER_POINT_CHOICES:
+            with self.subTest(target=target):
+                allocated = target // 2
+                self.assertEqual(
+                    editor.validate_ether_point_target(target, allocated),
+                    target - allocated,
+                )
+
+    def test_validate_ether_point_target_rejects_non_presets(self):
+        for target in (-100, 0, 99, 150, 801, 900):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(ValueError, "must be one of"):
+                    editor.validate_ether_point_target(target)
+
+    def test_validate_ether_point_target_rejects_allocations_above_target(self):
+        with self.assertRaisesRegex(ValueError, "already allocated"):
+            editor.validate_ether_point_target(100, allocated_nodes=101)
+
+    def test_validate_ether_point_target_rejects_negative_allocations(self):
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            editor.validate_ether_point_target(100, allocated_nodes=-1)
+
+    def test_active_ether_loadout_index_defaults_to_zero_when_missing(self):
+        self.assertEqual(editor.active_ether_loadout_index_from_text(SAMPLE_SAVE), 0)
+
+    def test_active_ether_loadout_index_accepts_valid_whole_number_values(self):
+        for expected in (0, 1, editor.ETHER_LOADOUT_COUNT - 1):
+            with self.subTest(expected=expected):
+                text = editor.set_ini_value(SAMPLE_SAVE, "0", "ether_loadout", str(expected), "number")
+                self.assertEqual(editor.active_ether_loadout_index_from_text(text), expected)
+
+    def test_active_ether_loadout_index_rejects_fractional_values(self):
+        text = editor.set_ini_value(SAMPLE_SAVE, "0", "ether_loadout", "2.5", "number")
+        with self.assertRaisesRegex(ValueError, "Invalid Ether loadout value"):
+            editor.active_ether_loadout_index_from_text(text)
+
+    def test_active_ether_loadout_index_rejects_out_of_range_values(self):
+        for value in (-1, editor.ETHER_LOADOUT_COUNT):
+            with self.subTest(value=value):
+                text = editor.set_ini_value(SAMPLE_SAVE, "0", "ether_loadout", str(value), "number")
+                with self.assertRaisesRegex(ValueError, "must be between"):
+                    editor.active_ether_loadout_index_from_text(text)
+
+    def test_stage_ether_point_target_cancel_keeps_raw_and_disk_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_path = Path(directory) / "herosiege1.hss"
+            on_disk = b"encoded character bytes stay untouched"
+            save_path.write_bytes(on_disk)
+            app = self.make_ether_stage_app(save_path)
+
+            with (
+                patch.object(editor.messagebox, "askyesno", return_value=False) as confirm,
+                patch.object(editor, "set_total_ether_points", wraps=editor.set_total_ether_points) as set_total,
+            ):
+                changed = app.stage_ether_point_target(400, allocated_nodes=7)
+
+            self.assertFalse(changed)
+            self.assertEqual(app.raw_buffer, SAMPLE_SAVE)
+            self.assertEqual(save_path.read_bytes(), on_disk)
+            confirm.assert_called_once()
+            set_total.assert_not_called()
+
+    def test_stage_ether_point_target_preserves_dirty_character_and_shop_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_path = Path(directory) / "herosiege1.hss"
+            shop_path = Path(directory) / "shop.ini"
+            character_on_disk = b"encoded character bytes stay untouched"
+            shop_on_disk = b"shop bytes stay untouched"
+            save_path.write_bytes(character_on_disk)
+            shop_path.write_bytes(shop_on_disk)
+
+            interpreter = tk.Tcl()
+            app = object.__new__(editor.HssEditorApp)
+            app.root = interpreter
+            app.loaded = editor.LoadedSave(
+                save_path,
+                SAMPLE_SAVE,
+                "character_ini",
+                shop_path,
+                editor.default_shop_ini_text(),
+            )
+            app.raw_text = None
+            app.raw_buffer = SAMPLE_SAVE
+            app._character_field_vars_dirty = False
+            app._suppress_field_trace = False
+            app.field_widgets = {}
+            app.status_messages = []
+            app.set_status = app.status_messages.append
+
+            name_spec = next(spec for spec in editor.CHARACTER_FIELDS if spec.key == "name")
+            gold_spec = next(spec for spec in editor.CHARACTER_FIELDS if spec.key == "gold")
+            profession_spec = next(spec for spec in editor.PROFESSION_FIELDS if spec.key == "herbalism")
+            app.field_vars = {
+                name_spec: tk.StringVar(master=interpreter, value="Test Hero"),
+                gold_spec: tk.StringVar(master=interpreter, value="0"),
+                profession_spec: tk.StringVar(master=interpreter, value="0"),
+            }
+            for variable in app.field_vars.values():
+                variable.trace_add("write", app._mark_character_fields_dirty)
+
+            app.field_vars[name_spec].set("Dirty Hero")
+            app.field_vars[gold_spec].set("12345")
+            app.field_vars[profession_spec].set("77")
+            self.assertTrue(app._character_field_vars_dirty)
+
+            with patch.object(editor.messagebox, "askyesno", return_value=True):
+                changed = app.stage_ether_point_target(300, allocated_nodes=7)
+
+            self.assertTrue(changed)
+            self.assertEqual(app.field_vars[name_spec].get(), "Dirty Hero")
+            self.assertEqual(app.field_vars[gold_spec].get(), "12345")
+            self.assertEqual(app.field_vars[profession_spec].get(), "77")
+            self.assertTrue(app._character_field_vars_dirty)
+            self.assertEqual(editor.get_ini_value(app.raw_buffer, "0", "name"), "Dirty Hero")
+            self.assertEqual(editor.ether_earned_points(app.raw_buffer), 300)
+            self.assertEqual(save_path.read_bytes(), character_on_disk)
+            self.assertEqual(shop_path.read_bytes(), shop_on_disk)
+
+    def test_stage_ether_point_target_stages_selected_total_without_writing_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_path = Path(directory) / "herosiege1.hss"
+            on_disk = b"encoded character bytes stay untouched"
+            save_path.write_bytes(on_disk)
+            app = self.make_ether_stage_app(save_path)
+
+            with patch.object(editor.messagebox, "askyesno", return_value=True) as confirm:
+                changed = app.stage_ether_point_target(300, allocated_nodes=7)
+
+            self.assertTrue(changed)
+            self.assertEqual(editor.ether_earned_points(app.raw_buffer), 300)
+            self.assertEqual(save_path.read_bytes(), on_disk)
+            self.assertEqual(
+                app.status_messages[-1],
+                "300 Ether Points are ready. Click Save Character to finish.",
+            )
+            confirm.assert_called_once()
+
+    def test_stage_ether_point_target_rejects_target_below_allocations_without_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_path = Path(directory) / "herosiege1.hss"
+            on_disk = b"encoded character bytes stay untouched"
+            save_path.write_bytes(on_disk)
+            app = self.make_ether_stage_app(save_path)
+
+            with (
+                patch.object(editor.messagebox, "showwarning") as warning,
+                patch.object(editor.messagebox, "askyesno") as confirm,
+            ):
+                changed = app.stage_ether_point_target(100, allocated_nodes=101)
+
+            self.assertFalse(changed)
+            self.assertEqual(app.raw_buffer, SAMPLE_SAVE)
+            self.assertEqual(save_path.read_bytes(), on_disk)
+            warning.assert_called_once()
+            confirm.assert_not_called()
+
+    def test_ether_selector_return_on_cancel_does_not_apply_or_confirm(self):
+        root, app = self.make_tk_ether_selector_app()
+        window = app.ether_points_window
+        cancel_button = next(
+            widget
+            for widget in self.iter_tk_descendants(window)
+            if isinstance(widget, tk.Button) and widget.cget("text") == "Cancel"
+        )
+        raw_before = app.raw_buffer
+
+        with (
+            patch.object(app, "stage_ether_point_target", return_value=True) as stage,
+            patch.object(editor.messagebox, "askyesno") as confirm,
+        ):
+            cancel_button.focus_force()
+            root.update()
+            cancel_button.event_generate("<Return>", when="tail")
+            root.update()
+
+        stage.assert_not_called()
+        confirm.assert_not_called()
+        self.assertEqual(app.raw_buffer, raw_before)
+        self.assertIsNone(app.ether_points_window)
+
+    def test_ether_selector_return_does_not_bypass_disabled_apply(self):
+        root, app = self.make_tk_ether_selector_app(range(150))
+        window = app.ether_points_window
+        widgets = list(self.iter_tk_descendants(window))
+        target_combo = next(widget for widget in widgets if isinstance(widget, ttk.Combobox))
+        apply_button = next(
+            widget
+            for widget in widgets
+            if isinstance(widget, tk.Button) and widget.cget("text") == "Apply Changes"
+        )
+        target_combo.set("100")
+        target_combo.event_generate("<<ComboboxSelected>>", when="tail")
+        root.update()
+        self.assertEqual(str(apply_button.cget("state")), "disabled")
+        raw_before = app.raw_buffer
+
+        with (
+            patch.object(app, "stage_ether_point_target", return_value=True) as stage,
+            patch.object(editor.messagebox, "askyesno") as confirm,
+        ):
+            target_combo.focus_force()
+            root.update()
+            target_combo.event_generate("<Return>", when="tail")
+            root.update()
+
+        stage.assert_not_called()
+        confirm.assert_not_called()
+        self.assertEqual(app.raw_buffer, raw_before)
+        self.assertIsNotNone(app.ether_points_window)
+
+    def test_ether_selector_return_applies_from_combobox_when_enabled(self):
+        root, app = self.make_tk_ether_selector_app(range(7))
+        window = app.ether_points_window
+        target_combo = next(
+            widget
+            for widget in self.iter_tk_descendants(window)
+            if isinstance(widget, ttk.Combobox)
+        )
+        target_combo.set("300")
+        target_combo.event_generate("<<ComboboxSelected>>", when="tail")
+        root.update()
+
+        with patch.object(app, "stage_ether_point_target", return_value=True) as stage:
+            target_combo.focus_force()
+            root.update()
+            target_combo.event_generate("<Return>", when="tail")
+            root.update()
+
+        stage.assert_called_once_with(300, 7, parent=window)
+        self.assertIsNone(app.ether_points_window)
+
+    def test_ether_selector_return_applies_from_enabled_apply_button(self):
+        root, app = self.make_tk_ether_selector_app(range(11))
+        window = app.ether_points_window
+        widgets = list(self.iter_tk_descendants(window))
+        target_combo = next(widget for widget in widgets if isinstance(widget, ttk.Combobox))
+        apply_button = next(
+            widget
+            for widget in widgets
+            if isinstance(widget, tk.Button) and widget.cget("text") == "Apply Changes"
+        )
+        target_combo.set("400")
+        target_combo.event_generate("<<ComboboxSelected>>", when="tail")
+        root.update()
+        self.assertEqual(str(apply_button.cget("state")), "normal")
+
+        with patch.object(app, "stage_ether_point_target", return_value=True) as stage:
+            apply_button.focus_force()
+            root.update()
+            apply_button.event_generate("<Return>", when="tail")
+            root.update()
+
+        stage.assert_called_once_with(400, 11, parent=window)
+        self.assertIsNone(app.ether_points_window)
 
     def test_grant_400_available_ether_points_accounts_for_allocated_nodes(self):
         result = editor.grant_available_ether_points(SAMPLE_SAVE, 400, allocated_nodes=1)
