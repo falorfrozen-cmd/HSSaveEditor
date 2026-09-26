@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import zlib
 from dataclasses import dataclass
@@ -43,10 +44,14 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
+GAME_PROCESS_NAME = "Hero_Siege.exe"
+# Keeps tasklist and PowerShell from flashing a console window out of the
+# windowed build. The flag only exists on Windows; 0 means no flags.
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 CHARACTER_BACKUP_NAME_PATTERN = re.compile(
     r"^herosiege\d+\.hss\.bak_\d{8}_\d{6}$",
     re.IGNORECASE,
@@ -664,6 +669,65 @@ def decode_hss_file(path: Path) -> str:
         return plain
 
     return decode_hss_bytes(plain)
+
+
+def tasklist_says_running(process_name: str = GAME_PROCESS_NAME) -> bool | None:
+    """Ask tasklist whether ``process_name`` is running; None if it gave no answer.
+
+    Every CSV row starts with the quoted image name, whatever the Windows
+    language. Only the "no tasks" notice is translated, and Turkish or German
+    Windows prints it in the OEM code page, so the output is decoded leniently
+    instead of being trusted to be UTF-8.
+    """
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {process_name}", "/FO", "CSV", "/NH"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    wanted = f'"{process_name}"'.casefold()
+    output = result.stdout.decode("utf-8", errors="replace")
+    return any(line.strip().casefold().startswith(wanted) for line in output.splitlines())
+
+
+def powershell_says_running(process_name: str = GAME_PROCESS_NAME) -> bool | None:
+    """Ask PowerShell's Get-Process the same question; None if it gave no count."""
+    command = f"(Get-Process -Name {Path(process_name).stem} -ErrorAction SilentlyContinue | Measure-Object).Count"
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=15,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    count = result.stdout.decode("utf-8", errors="replace").strip()
+    if result.returncode != 0 or not count.isdigit():
+        return None
+    return int(count) > 0
+
+
+def game_running_state(process_name: str = GAME_PROCESS_NAME) -> bool | None:
+    """True while Hero Siege runs, False when it does not, None when unknown.
+
+    A running game keeps the character in memory and writes it back over the
+    save files, so every write asks this first. PowerShell is asked only when
+    tasklist gave no answer. None means neither could run, which can happen
+    under Wine or Proton; the caller then lets the player decide instead of
+    guessing either way.
+    """
+    running = tasklist_says_running(process_name)
+    if running is None:
+        running = powershell_says_running(process_name)
+    return running
 
 
 def write_hss_file(path: Path, text: str, create_backup: bool = True) -> Path | None:
@@ -2811,6 +2875,39 @@ class HssEditorApp:
             self.folder_label.config(text=str(self.save_dir))
             self.refresh_file_list()
 
+    def ensure_game_closed(self, parent: Tk | Toplevel | None = None) -> bool:
+        """Return True when a write may go ahead because Hero Siege is closed.
+
+        Called right before each write, so a game started after the editor
+        opened is caught too. While the game runs the write is refused. When
+        the check cannot run at all, the player decides.
+        """
+        running = game_running_state()
+        if running:
+            self.set_status("Hero Siege is running. Close it, then try again. No file was changed.")
+            messagebox.showerror(
+                APP_TITLE,
+                "Hero Siege is running.\n\n"
+                "Close the game completely, then try again. While it runs, the game can "
+                "overwrite the save files this editor changes.\n\n"
+                "No file was changed.",
+                parent=parent,
+            )
+            return False
+        if running is None and not messagebox.askyesno(
+            APP_TITLE,
+            "Could not check whether Hero Siege is running.\n\n"
+            "If the game is open, it can overwrite this change with its own save. "
+            "Continue only if Hero Siege is fully closed.\n\n"
+            "Continue anyway?",
+            icon="warning",
+            default="no",
+            parent=parent,
+        ):
+            self.set_status("Could not check whether Hero Siege is running. No file was changed.")
+            return False
+        return True
+
     def clean_character_backups(self) -> None:
         try:
             backups = scan_character_backup_files(self.save_dir)
@@ -2850,6 +2947,8 @@ class HssEditorApp:
             parent=self.root,
         ):
             self.set_status("Character backup cleanup cancelled.")
+            return
+        if not self.ensure_game_closed(parent=self.root):
             return
 
         deleted, failures = delete_character_backup_files(self.save_dir, backups)
@@ -2975,6 +3074,8 @@ class HssEditorApp:
             "its name, class and level. Close Hero Siege first.",
         ):
             self.set_status(f"Slot {slot:02d} left empty.")
+            return
+        if not self.ensure_game_closed():
             return
         try:
             backup = create_blank_character_slot(path)
@@ -4179,6 +4280,8 @@ class HssEditorApp:
             return
         if not self.apply_ether_nodes_to_memory(update_status=False):
             return
+        if not self.ensure_game_closed(parent=self.ether_window):
+            return
         try:
             backup = write_ether_file(self.ether_path, self.ether_data, create_backup=self.ether_path.exists())
             self.ether_data = read_ether_file(self.ether_path)
@@ -4253,6 +4356,8 @@ class HssEditorApp:
         if prepared is None:
             return
         text, shop_text = prepared
+        if not self.ensure_game_closed():
+            return
 
         try:
             backup = write_hss_file(self.loaded.path, text, create_backup=True)
@@ -4293,6 +4398,8 @@ class HssEditorApp:
         if prepared is None:
             return
         text, shop_text = prepared
+        if not self.ensure_game_closed():
+            return
 
         try:
             backup = write_hss_file(path, text, create_backup=path.exists())

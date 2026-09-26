@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import subprocess
 import tempfile
 import tkinter as tk
 import unittest
@@ -9,6 +10,20 @@ from tkinter import ttk
 from unittest.mock import patch
 
 import hs_save_editor as editor
+
+# Every write now asks whether Hero Siege is running. The suite must not depend
+# on whether the game happens to be open on the machine running it, so each test
+# sees "closed" unless it patches the check itself.
+REAL_GAME_RUNNING_STATE = editor.game_running_state
+GAME_CLOSED = patch.object(editor, "game_running_state", return_value=False)
+
+
+def setUpModule():
+    GAME_CLOSED.start()
+
+
+def tearDownModule():
+    GAME_CLOSED.stop()
 
 
 SAMPLE_SAVE = """[4]
@@ -1718,6 +1733,152 @@ class DeletedSlotTests(unittest.TestCase):
             "Slot 08   Not a character",
         ):
             self.assertFalse(editor.list_label_is_character(label), label)
+
+
+class GameRunningGuardTests(unittest.TestCase):
+    """v1.4.3: a running Hero Siege writes its in-memory character back over the
+    save files, so every write first asks whether the game runs. A running game
+    refuses the write; a check that cannot run at all leaves it to the player."""
+
+    # tasklist on Windows 11 with Hero Siege open, captured 2026-09-26.
+    TASKLIST_RUNNING = b'"Hero_Siege.exe","54252","Console","1","4.223.536 K"\r\n'
+    # The same machine asked about a process that is not running.
+    TASKLIST_NONE = b"INFO: No tasks are running which match the specified criteria.\r\n"
+    # Turkish Windows prints that notice in the OEM code page, which is not
+    # UTF-8. This machine's console prints it in English, so these bytes are
+    # encoded here rather than captured.
+    TASKLIST_NONE_TURKISH = "BİLGİ: Belirtilen ölçütlerle eşleşen çalışan görev yok.\r\n".encode("cp857")
+
+    WRITES = ("save character", "save as", "save ether", "delete backups", "new character in emptied slot")
+
+    @staticmethod
+    def finished(stdout: bytes, returncode: int = 0) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=b"")
+
+    @staticmethod
+    def files(directory: Path) -> dict[str, bytes]:
+        return {path.name: path.read_bytes() for path in sorted(directory.iterdir()) if path.is_file()}
+
+    @staticmethod
+    def make_write(directory: Path, write: str):
+        """Set up one of the editor's five writes in ``directory``.
+
+        Returns the app, the call that makes the write, and how many of the
+        editor's own yes/no questions come before the game check.
+        """
+        app = DeletedSlotTests.make_slot_app(directory)
+        app.ether_window = None
+        app._character_field_vars_dirty = False
+        slot = directory / "herosiege1.hss"
+        editor.write_hss_file(slot, SAMPLE_SAVE, create_backup=False)
+        edited = SAMPLE_SAVE.replace('name="Test Hero"', 'name="Edited Hero"')
+        app.loaded = editor.LoadedSave(path=slot, text=SAMPLE_SAVE, file_kind="character_ini")
+        app.prepared_texts_for_save = lambda _shop_path: (edited, None)
+        if write == "save character":
+            return app, app.save_current, 0
+        if write == "save as":
+            return app, app.save_as, 0
+        if write == "save ether":
+            app.ether_path = directory / "ether1.hss"
+            app.ether_data = editor.default_ether_data()
+            app.apply_ether_nodes_to_memory = lambda **_kwargs: True
+            app.refresh_ether_window = lambda *_args, **_kwargs: None
+            return app, app.save_ether_changes, 0
+        if write == "delete backups":
+            (directory / "herosiege1.hss.bak_20260926_120000").write_bytes(b"old backup")
+            return app, app.clean_character_backups, 1
+        emptied = directory / "herosiege6.hss"
+        emptied.write_bytes(b"\x00")
+        app.loaded = None
+        return app, lambda: app.load_file(emptied), 1
+
+    def run_write(self, write: str, running: bool | None, answer: bool = True):
+        """Make one write while the game check answers ``running``.
+
+        ``answer`` is the player's reply to "Continue anyway?", which is asked
+        only when the check could not run.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app, make_write, confirms = self.make_write(root, write)
+            before = self.files(root)
+            with (
+                patch.object(editor, "game_running_state", return_value=running),
+                patch.object(editor.messagebox, "askyesno", side_effect=[True] * confirms + [answer]) as askyesno,
+                patch.object(editor.messagebox, "showerror") as showerror,
+                patch.object(editor.messagebox, "showinfo"),
+                patch.object(editor.messagebox, "showwarning"),
+                patch.object(editor.filedialog, "asksaveasfilename", return_value=str(root / "herosiege2.hss")),
+            ):
+                make_write()
+            after = self.files(root)
+        return before, after, askyesno, showerror, app
+
+    def test_tasklist_row_for_the_game_means_running(self):
+        with patch.object(editor.subprocess, "run", return_value=self.finished(self.TASKLIST_RUNNING)) as run:
+            self.assertIs(REAL_GAME_RUNNING_STATE(), True)
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "tasklist")
+        self.assertIn("IMAGENAME eq Hero_Siege.exe", command)
+        self.assertEqual(command[command.index("/FO") + 1], "CSV")
+        self.assertIn("/NH", command)
+
+    def test_no_tasks_notice_means_closed_in_any_language(self):
+        with self.assertRaises(UnicodeDecodeError):
+            self.TASKLIST_NONE_TURKISH.decode("utf-8")
+        for notice in (self.TASKLIST_NONE, self.TASKLIST_NONE_TURKISH):
+            with patch.object(editor.subprocess, "run", return_value=self.finished(notice)) as run:
+                self.assertIs(REAL_GAME_RUNNING_STATE(), False)
+            run.assert_called_once()
+
+    def test_powershell_answers_when_tasklist_cannot(self):
+        for count, expected in ((b"1\r\n", True), (b"0\r\n", False)):
+            with patch.object(
+                editor.subprocess,
+                "run",
+                side_effect=[FileNotFoundError("tasklist"), self.finished(count)],
+            ) as run:
+                self.assertIs(REAL_GAME_RUNNING_STATE(), expected)
+            self.assertEqual(run.call_args_list[1].args[0][0], "powershell")
+
+    def test_unknown_when_neither_check_answers(self):
+        for outcomes in (
+            [FileNotFoundError("tasklist"), FileNotFoundError("powershell")],
+            [self.finished(b"", returncode=1), subprocess.TimeoutExpired("powershell", 15)],
+            [self.finished(b"", returncode=1), self.finished(b"not a count\r\n")],
+        ):
+            with patch.object(editor.subprocess, "run", side_effect=outcomes):
+                self.assertIsNone(REAL_GAME_RUNNING_STATE())
+
+    def test_a_running_game_blocks_every_write(self):
+        for write in self.WRITES:
+            with self.subTest(write=write):
+                before, after, _askyesno, showerror, app = self.run_write(write, running=True)
+                self.assertEqual(after, before)
+                showerror.assert_called_once()
+                self.assertIn("Hero Siege is running", showerror.call_args.args[1])
+                self.assertIn("No file was changed", app.status_messages[-1])
+
+    def test_a_closed_game_lets_every_write_through(self):
+        for write in self.WRITES:
+            with self.subTest(write=write):
+                before, after, _askyesno, showerror, _app = self.run_write(write, running=False)
+                self.assertNotEqual(after, before)
+                showerror.assert_not_called()
+
+    def test_an_unknown_state_asks_and_only_yes_writes(self):
+        for write in self.WRITES:
+            for answer in (False, True):
+                with self.subTest(write=write, answer=answer):
+                    before, after, askyesno, _showerror, _app = self.run_write(write, running=None, answer=answer)
+                    self.assertIn("Could not check whether Hero Siege is running", askyesno.call_args.args[1])
+                    self.assertEqual(askyesno.call_args.kwargs.get("default"), "no")
+                    if answer:
+                        self.assertNotEqual(after, before)
+                    else:
+                        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

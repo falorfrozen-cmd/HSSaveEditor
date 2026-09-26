@@ -1,3 +1,18 @@
+# Hero Siege Save Editor v1.4.3
+
+## What changed
+
+- New: the editor refuses to write while Hero Siege is running. Save Character, Save As, Save Ether, starting a character in an emptied slot and Delete Character Backups first check whether `Hero_Siege.exe` is running. If it is, nothing is written and the editor asks you to close the game and try again. Before, the editor only told you to close the game, and a game left running could save its own copy of the character over your changes.
+- If the editor cannot check (possible under Proton or Wine), it asks before writing instead of guessing.
+- No other behaviour changed.
+
+## Tested
+
+- All 105 automated tests pass, including 7 new ones: each of the five writes is refused while the game runs, goes through when it is closed, and asks first when the check cannot run.
+- The check was run against a live Hero Siege on Windows 11. It reported the running game, and reported nothing for a process that was not running.
+
+This tool is for offline/single-player characters only. Close Hero Siege before editing and keep the automatic backup.
+
 # Hero Siege Save Editor v1.4.2
 
 ## What changed
