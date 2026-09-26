@@ -1556,5 +1556,169 @@ class Season10ProgressTests(unittest.TestCase):
             editor.active_talent_loadout_index(save)
 
 
+# An unused character slot exactly as the game writes it to disk on a fresh
+# Season 10 install: its blank character, encoded, then the trailing NUL.
+# Deleting a character in the game leaves a single NUL byte instead.
+GAME_UNUSED_SLOT_FILE = (
+    "eJwdkE1IlEEYx0HUiFYFD1GIH2RIBw8KVoNCrKzvGAi6YeQgFkIF4hz2MpEHmXYVNOiwO6vjB0bH"
+    "mIMgA8IoKWSCFo4gLql1aIXIm8o7IQOdetzzj//ninysE/QzaUaP8HeG7f3gjvvnP5rG8Jk6Fxk+"
+    "IXv1K/qDNCCM37Nrtg74if9iRsOE2haHfEy+1DG6QcrREP7Leuzt4Kq78NumA7gVab4I/jGaItXo"
+    "NRas30aCSnfq86YzHFTLYoanZIVuoXvkLuinWZWtDUpd1i+AvljtiBz/BLyJ/iT30Aj2LAB9m/vq"
+    "rYmF3WpT5PmS5DpK88CH8C4bgPxS98H/MjwsUadiik/KuO6jm6QJ9HMsDv2vAN83bwr5b/mqHNZx"
+    "0FehJ/g3qwH/m27WH5lEyCA/C/uGod8W+JdBv56Cf9bPw/5L/QH0L9dddJxEgGdYO/R/7nb8Buif"
+    "qjORgv86YH+a3ECj+JhFbUNwHfIXCvtXoF8S+EOaLPyzz7ptfVDk/visKQ5b1TuxznNyUEfoGrmF"
+    "+nEO/msMHrhvfgZ4hVqC/Jws0810grxA1XiR1dv/FIHtcg=="
+    "\x00"
+)
+
+
+class DeletedSlotTests(unittest.TestCase):
+    """A character deleted in the game leaves its slot file empty. The editor
+    offers the game's own blank character for that slot instead of a dead end."""
+
+    @staticmethod
+    def make_slot_app(save_dir: Path):
+        app = object.__new__(editor.HssEditorApp)
+        app.save_dir = save_dir
+        app.root = None
+        app.loaded = None
+        app.status_messages = []
+        app.set_status = app.status_messages.append
+        app.refreshes = []
+        app.refresh_file_list = lambda: app.refreshes.append(True)
+        app.current_file = tk.StringVar(master=tk.Tcl())
+        app.opened_texts = []
+        app.set_raw = app.opened_texts.append
+        app.populate_fields_from_raw = lambda **_kwargs: None
+        return app
+
+    def test_unused_slot_from_the_game_is_the_built_in_blank_character(self):
+        with tempfile.TemporaryDirectory() as directory:
+            slot = Path(directory) / "herosiege10.hss"
+            slot.write_bytes(GAME_UNUSED_SLOT_FILE.encode("ascii"))
+
+            self.assertEqual(editor.decode_hss_file(slot), editor.BLANK_SLOT_TEXT)
+            self.assertEqual(editor.classify_text(editor.BLANK_SLOT_TEXT, slot), "character_ini")
+            label = editor.save_list_label("herosiege10.hss", slot)
+            self.assertEqual(label, "Slot 10   Unnamed")
+            self.assertFalse(editor.list_label_is_character(label))
+
+    def test_slot_emptied_by_an_in_game_delete_is_listed_as_empty(self):
+        self.assertTrue(issubclass(editor.EmptySlotError, editor.HssFormatError))
+        with tempfile.TemporaryDirectory() as directory:
+            for name, content in (("herosiege6.hss", b"\x00"), ("herosiege7.hss", b"")):
+                slot = Path(directory) / name
+                slot.write_bytes(content)
+
+                with self.assertRaisesRegex(editor.EmptySlotError, "This save slot is empty."):
+                    editor.decode_hss_file(slot)
+                label = editor.save_list_label(name, slot)
+                self.assertTrue(label.endswith(editor.EMPTY_SLOT_LIST_NAME), label)
+                self.assertFalse(editor.list_label_is_character(label))
+
+    def test_blank_character_goes_into_an_emptied_slot_after_a_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            slot = Path(directory) / "herosiege6.hss"
+            slot.write_bytes(b"\x00")
+
+            backup = editor.create_blank_character_slot(slot)
+
+            self.assertIsNotNone(backup)
+            self.assertEqual(backup.read_bytes(), b"\x00")
+            self.assertRegex(backup.name, editor.CHARACTER_BACKUP_NAME_PATTERN)
+            self.assertEqual(editor.decode_hss_file(slot), editor.BLANK_SLOT_TEXT)
+            self.assertEqual(editor.save_list_label("herosiege6.hss", slot), "Slot 06   Unnamed")
+
+    def test_blank_character_never_overwrites_a_save_or_another_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_dir = Path(directory)
+            populated = save_dir / "herosiege6.hss"
+            encoded = editor.encode_hss_text(SAMPLE_SAVE) + "\x00"
+            populated.write_text(encoded, encoding="ascii", newline="")
+
+            with self.assertRaisesRegex(editor.HssFormatError, "not empty any more"):
+                editor.create_blank_character_slot(populated)
+            self.assertEqual(populated.read_text(encoding="ascii"), encoded)
+
+            for name in ("ether6.hss", "stash.hss", "old_herosiege6.hss"):
+                other = save_dir / name
+                other.write_bytes(b"\x00")
+                with self.assertRaisesRegex(editor.HssFormatError, "not a character slot file"):
+                    editor.create_blank_character_slot(other)
+                self.assertEqual(other.read_bytes(), b"\x00")
+
+            self.assertEqual(
+                sorted(item.name for item in save_dir.iterdir()),
+                ["ether6.hss", "herosiege6.hss", "old_herosiege6.hss", "stash.hss"],
+            )
+
+    def test_opening_an_emptied_slot_asks_before_writing_anything(self):
+        with tempfile.TemporaryDirectory() as directory:
+            slot = Path(directory) / "herosiege6.hss"
+            slot.write_bytes(b"\x00")
+            app = self.make_slot_app(Path(directory))
+
+            with (
+                patch.object(editor.messagebox, "askyesno", return_value=False) as confirm,
+                patch.object(editor.messagebox, "showinfo") as info,
+            ):
+                app.load_file(slot)
+
+            confirm.assert_called_once()
+            info.assert_not_called()
+            self.assertEqual(slot.read_bytes(), b"\x00")
+            self.assertEqual(sorted(item.name for item in Path(directory).iterdir()), ["herosiege6.hss"])
+            self.assertIsNone(app.loaded)
+            self.assertEqual(app.status_messages[-1], "Slot 06 left empty.")
+
+    def test_confirming_opens_a_new_character_in_the_emptied_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            slot = Path(directory) / "herosiege6.hss"
+            slot.write_bytes(b"\x00")
+            app = self.make_slot_app(Path(directory))
+
+            with patch.object(editor.messagebox, "askyesno", return_value=True) as confirm:
+                app.load_file(slot)
+
+            confirm.assert_called_once()
+            self.assertEqual(app.loaded.path, slot)
+            self.assertEqual(app.loaded.text, editor.BLANK_SLOT_TEXT)
+            self.assertEqual(app.loaded.file_kind, "character_ini")
+            self.assertEqual(app.opened_texts, [editor.BLANK_SLOT_TEXT])
+            self.assertEqual(len(app.refreshes), 1)
+            self.assertEqual(len(list(Path(directory).glob("herosiege6.hss.bak_*"))), 1)
+            self.assertTrue(
+                app.status_messages[-1].startswith("New character started in slot 06."),
+                app.status_messages[-1],
+            )
+
+    def test_other_empty_files_keep_the_plain_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            other = Path(directory) / "stash.hss"
+            other.write_bytes(b"\x00")
+            app = self.make_slot_app(Path(directory))
+
+            with (
+                patch.object(editor.messagebox, "askyesno") as confirm,
+                patch.object(editor.messagebox, "showinfo") as info,
+            ):
+                app.load_file(other)
+
+            confirm.assert_not_called()
+            info.assert_called_once()
+            self.assertIn("is not a usable character save", info.call_args.args[1])
+            self.assertEqual(other.read_bytes(), b"\x00")
+
+    def test_character_count_skips_empty_blank_and_unreadable_slots(self):
+        self.assertTrue(editor.list_label_is_character("Slot 01   Test Hero - Pyromancer"))
+        for label in (
+            "Slot 10   Unnamed",
+            f"Slot 06   {editor.EMPTY_SLOT_LIST_NAME}",
+            "Slot 07   Empty / unsupported",
+            "Slot 08   Not a character",
+        ):
+            self.assertFalse(editor.list_label_is_character(label), label)
+
+
 if __name__ == "__main__":
     unittest.main()

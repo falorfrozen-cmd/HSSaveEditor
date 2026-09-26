@@ -60,6 +60,8 @@ The game must be fully closed before opening, editing, or saving a character fil
 
 Backups are created next to the edited save file.
 
+Deleting a character in Hero Siege does not remove its slot file: the game empties it, and the list shows that slot as `Empty slot - open to start a new character`. Open it and confirm to start a new character there. The editor backs up the empty file, writes the same blank character the game keeps in a slot that was never played, and opens it so you can set its name, class and level. Copying another slot's file over it by hand is not needed.
+
 To change Ether Points, press `ETHER POINTS`, choose the total earned value, and confirm. Existing Ether Tree upgrades stay allocated, so the available balance is the chosen total minus the active loadout's allocated nodes. The change remains staged until you press `Save Character`.
 
 To remove old character backups, choose the save folder and press `Delete Character Backups`. The cleanup matches only files named like `herosiegeN.hss.bak_YYYYMMDD_HHMMSS` in that folder (and its direct, non-linked `hs2saves` folder). Symlinks and Windows junctions are not followed. It does not delete current character saves or any Stash, Shop, or Ether file.
@@ -73,7 +75,7 @@ Difficulty)** once. The Inferno waypoint tier also covers the lower difficulties
 
 ## Steam Deck / Proton Notes
 
-If a slot appears as `Empty / unsupported`, that file is not a readable character save for this editor. It may be an empty character slot, a Steam Cloud placeholder, or a different folder than the one the game actually uses.
+If a slot appears as `Empty / unsupported`, that file is not a readable character save for this editor. It may be a Steam Cloud placeholder, a save from another platform, or a different folder than the one the game actually uses. A slot emptied by deleting its character in the game is listed as `Empty slot - open to start a new character` instead (see How To Use).
 
 On Steam Deck, make sure the selected folder belongs to the same Proton prefix/account that launches Hero Siege.
 
