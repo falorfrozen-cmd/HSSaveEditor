@@ -1,3 +1,18 @@
+# Hero Siege Save Editor v1.4.2
+
+## What changed
+
+- Fixed: a slot whose character was deleted in the game could not be used again. Hero Siege empties the slot's save file when you delete a character, and the editor only answered "This save slot is empty". Opening such a slot now asks whether to start a new character there. On yes the editor backs up the empty file, writes the same blank character the game keeps in a slot that was never played, and opens it for editing. Copying another slot's file over it by hand is no longer needed.
+- The save list shows these slots as `Empty slot - open to start a new character` instead of `Empty / unsupported`, and the character count at the top no longer counts empty or unreadable slots as characters.
+- No other behaviour changed.
+
+## Tested
+
+- All 98 automated tests pass, including 8 new ones for emptied slots.
+- The blank character decodes to exactly the text of the file the game writes into an unused slot, and an emptied slot is left untouched unless you confirm.
+
+This tool is for offline/single-player characters only. Close Hero Siege before editing and keep the automatic backup.
+
 # Hero Siege Save Editor v1.4.1
 
 ## What changed

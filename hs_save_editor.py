@@ -43,7 +43,7 @@ from tkinter import (
 from tkinter.scrolledtext import ScrolledText
 
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 APP_TITLE = f"Hero Siege Character Save Editor v{APP_VERSION}"
 HERO_SIEGE_ROOT = Path.home() / "AppData" / "Local" / "Hero_Siege"
 DEFAULT_SAVE_DIR = HERO_SIEGE_ROOT
@@ -317,9 +317,16 @@ def character_metadata_from_text(text: str) -> tuple[str, str]:
     return (name, class_name)
 
 
+EMPTY_SLOT_LIST_NAME = "Empty slot - open to start a new character"
+# Names the list shows for a slot that holds no playable character.
+NON_CHARACTER_LIST_NAMES = ("Unnamed", EMPTY_SLOT_LIST_NAME, "Empty / unsupported", "Not a character")
+
+
 def summarize_save_for_list(path: Path) -> tuple[str, str]:
     try:
         text = decode_hss_file(path)
+    except EmptySlotError:
+        return (EMPTY_SLOT_LIST_NAME, "")
     except Exception:
         return ("Empty / unsupported", "")
     if classify_text(text, path) != "character_ini":
@@ -333,6 +340,11 @@ def save_list_label(display: str, path: Path) -> str:
     name, class_name = summarize_save_for_list(path)
     suffix = f" - {class_name}" if class_name else ""
     return f"{slot_label}   {name}{suffix}"
+
+
+def list_label_is_character(label: str) -> bool:
+    """False for list entries that stand for an empty, blank or unreadable slot."""
+    return not any(f"   {name}" in label for name in NON_CHARACTER_LIST_NAMES)
 
 # The second layer is a repeating XOR key over UTF-16LE-ish text bytes.
 # Odd bytes become zero after XOR, even bytes contain the actual text.
@@ -376,6 +388,10 @@ HSS_XOR_KEY = bytes(
 
 class HssFormatError(ValueError):
     """Raised when a file does not look like the supported .hss format."""
+
+
+class EmptySlotError(HssFormatError):
+    """Raised for a slot file with no save in it, which is what an in-game delete leaves."""
 
 
 class EtherFormatError(ValueError):
@@ -618,10 +634,30 @@ def encode_hss_text(text: str) -> str:
     return base64.b64encode(zlib.compress(obfuscated, level=9)).decode("ascii")
 
 
+# A slot that has never held a character is not empty on disk: the game keeps
+# a blank character there, an empty inventory plus the save version, and this
+# is that file decoded (checked byte for byte against unused Season 10 slots).
+# Deleting a character in the game does not put it back. The game rewrites the
+# slot's herosiegeN, etherN, incarnationN and inventory_order_N files with no
+# save at all, a single NUL byte, and such a slot cannot be opened for editing
+# until this blank character is written into it again.
+BLANK_SLOT_INVENTORY = base64.b64encode(
+    b'{ "equipped_items": { }, "minion_inventory_melee": { }, '
+    b'"minion_inventory_ranged": { }, "minion_inventory_magic": { }, "potions": { } }'
+).decode("ascii")
+BLANK_SLOT_TEXT = f'[inventory]\ninventory="{BLANK_SLOT_INVENTORY}"\n[0]\nversion="8.000000"\n'
+CHARACTER_SLOT_NAME_PATTERN = re.compile(r"herosiege(\d+)\.hss", re.IGNORECASE)
+
+
+def slot_bytes_are_empty(raw: bytes) -> bool:
+    """True when a slot file holds no save at all, only NUL bytes or whitespace."""
+    return not raw.strip(b"\x00\r\n\t ")
+
+
 def decode_hss_file(path: Path) -> str:
     raw = path.read_bytes()
-    if not raw or not raw.strip(b"\x00\r\n\t "):
-        raise HssFormatError("This save slot is empty.")
+    if slot_bytes_are_empty(raw):
+        raise EmptySlotError("This save slot is empty.")
 
     plain = normalize_line_endings(raw.decode("utf-8-sig", errors="ignore").replace("\x00", ""))
     if looks_like_plain_character_ini(plain):
@@ -639,6 +675,20 @@ def write_hss_file(path: Path, text: str, create_backup: bool = True) -> Path | 
 
     path.write_text(encode_hss_text(text) + "\x00", encoding="ascii", newline="")
     return backup_path
+
+
+def create_blank_character_slot(path: Path) -> Path | None:
+    """Write the game's blank character into a slot an in-game delete emptied.
+
+    Only a herosiegeN.hss that is still empty is written, so a slot that got a
+    character after the list was read is never overwritten. The empty file is
+    backed up first, like every other save this editor changes.
+    """
+    if not CHARACTER_SLOT_NAME_PATTERN.fullmatch(path.name):
+        raise HssFormatError(f"{path.name} is not a character slot file.")
+    if not slot_bytes_are_empty(path.read_bytes()):
+        raise HssFormatError(f"{path.name} is not empty any more, so it was left unchanged.")
+    return write_hss_file(path, BLANK_SLOT_TEXT, create_backup=True)
 
 
 def write_plain_ini_file(path: Path, text: str, create_backup: bool = True) -> Path | None:
@@ -2846,7 +2896,7 @@ class HssEditorApp:
         populated_count = 0
         for display, _path in sorted(display_paths, key=lambda item: save_slot_sort_key(item[0])):
             label = save_list_label(display, _path)
-            if "   Unnamed" not in label:
+            if list_label_is_character(label):
                 populated_count += 1
             if label in self.file_list_paths:
                 label = f"{label}   ({display})"
@@ -2884,7 +2934,9 @@ class HssEditorApp:
         try:
             text = decode_hss_file(path)
         except Exception as exc:
-            if isinstance(exc, HssFormatError):
+            if isinstance(exc, EmptySlotError) and CHARACTER_SLOT_NAME_PATTERN.fullmatch(path.name):
+                self.offer_blank_character(path)
+            elif isinstance(exc, HssFormatError):
                 messagebox.showinfo(
                     APP_TITLE,
                     f"{path.name} is not a usable character save.\n\n"
@@ -2909,6 +2961,33 @@ class HssEditorApp:
         self.set_raw(text)
         self.populate_fields_from_raw(show_errors=False)
         self.set_status(f"Opened {get_ini_value(text, '0', 'name') or path.name}. Ready to edit.")
+
+    def offer_blank_character(self, path: Path) -> None:
+        """Offer a new character for a slot that an in-game delete emptied."""
+        slot = save_slot_number(path.name)
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Slot {slot:02d} is empty.\n\n"
+            "Hero Siege empties a slot's file when you delete that character in the game, "
+            "so there is nothing to edit here.\n\n"
+            "Start a new character in this slot? The editor writes the same blank character "
+            "the game keeps in a slot that was never played, then opens it so you can set "
+            "its name, class and level. Close Hero Siege first.",
+        ):
+            self.set_status(f"Slot {slot:02d} left empty.")
+            return
+        try:
+            backup = create_blank_character_slot(path)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not start a new character in {path.name}:\n{exc}")
+            return
+        self.refresh_file_list()
+        self.load_file(path)
+        backup_part = f" Backup of the empty file: {backup.name}." if backup else ""
+        self.set_status(
+            f"New character started in slot {slot:02d}. "
+            f"Set its name and class, then click Save Character.{backup_part}"
+        )
 
     def reload_current(self) -> None:
         if not self.loaded:
