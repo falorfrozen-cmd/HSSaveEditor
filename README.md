@@ -20,7 +20,7 @@ This editor is intended for offline/single-player character saves only.
 
 Do not use it with multiplayer, online characters, leaderboards, trading, or anti-cheat protected modes.
 
-The game must be fully closed before opening, editing, or saving a character file. If the game is still running, it may overwrite your changes or keep the save file locked.
+The game must be fully closed before opening, editing, or saving a character file. If the game is still running, it may overwrite your changes or keep the save file locked. Since v1.4.3 the editor checks this itself: it refuses to save a character, save the Ether tree, start a character in an emptied slot, or delete backups while `Hero_Siege.exe` is running. If it cannot check (possible under Proton or Wine), it asks before writing.
 
 ## Features
 
@@ -46,6 +46,7 @@ The game must be fully closed before opening, editing, or saving a character fil
 - Uses a verified built-in class map if the current game tables cannot be found.
 - Safely repairs known subskill IDs written by older editor releases without guessing when old data is unclear.
 - Saves with automatic timestamped backup.
+- Checks that Hero Siege is closed before every write, and refuses while the game runs.
 - Cleans up automatic character backups on request with a confirmation step; current saves, Stash, `shop.ini`, and Ether files are never included.
 - Standalone Windows `.exe` build available.
 
@@ -78,6 +79,8 @@ Difficulty)** once. The Inferno waypoint tier also covers the lower difficulties
 If a slot appears as `Empty / unsupported`, that file is not a readable character save for this editor. It may be a Steam Cloud placeholder, a save from another platform, or a different folder than the one the game actually uses. A slot emptied by deleting its character in the game is listed as `Empty slot - open to start a new character` instead (see How To Use).
 
 On Steam Deck, make sure the selected folder belongs to the same Proton prefix/account that launches Hero Siege.
+
+Under Proton or Wine the editor may not be able to see whether Hero Siege is running. It then asks before each write; answer Yes only when the game is closed.
 
 ## Build From Source
 
