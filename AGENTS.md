@@ -25,7 +25,7 @@ sits next to the hub's `docs/`. In a standalone clone they do not — use the
 GitHub links above, and clone the hub alongside this repository if you are going
 to do real work, since several modules also build against `hs-game-sdk/` from it.
 
-Two rules matter too much to leave behind a link you might not follow:
+Three rules matter too much to leave behind a link you might not follow:
 
 ### Never commit decompiled or disassembled game source
 
@@ -48,3 +48,19 @@ paths `.gitignore` blocks as a backstop, is in the hub's `AGENTS.md`.
 When a change touches features, workflows, architecture or dependencies, update
 the `README.md`, the module guide, and any affected docs in the same change.
 A pull request that leaves them stale is unfinished.
+
+### Every piece of work has an issue on the "Hero Siege Tools" project
+
+The owner tracks every repository in this toolkit, this one included, from one
+GitHub project board: **"Hero Siege Tools"**, user project 1 of
+`falorfrozen-cmd`. Before starting work, find or open an issue for it in this
+repository, give its title a type prefix (`[Bug]`, `[QoL]`, `[Mod]`,
+`[Adjustment]`, `[Research]`, `[Tooling]`, `[Docs]`), and **add it to that
+project with a Status** (`Todo` when filed, `In Progress` when work starts)
+in the same step — an issue that is not on the board, or sits on it with no
+Status, is invisible to the owner. From the root of a hub checkout,
+`py -3 tools/issue_board.py move falorfrozen-cmd/HSSaveEditor <n> "<Status>"`
+does both; otherwise `gh issue create --project "Hero Siege Tools"` and set
+the Status on the board. If you cannot edit the project, say so in your report
+and on the issue instead of reporting it tracked. The full rule is the hub
+`AGENTS.md` § "Every Piece of Work Belongs to an Issue on the Board".
